@@ -32,7 +32,7 @@ The AWS AI Manager is a Streamlit-based conversational AI application designed t
 
 1.  **Navigate to the project directory**:
     ```bash
-    cd C:\Users\desai\gemini-cli\AWS_AI_MANAGER
+    cd AWS_AI_MANAGER
     ```
 2.  **Create a Python virtual environment (recommended)**:
     ```bash
