@@ -35,6 +35,12 @@ variable "allocated_storage" {
   description = "The amount of allocated storage in GB."
 }
 
+variable "db_publicly_accessible" {
+  type        = bool
+  description = "Specifies if the DB instance is publicly accessible."
+  default     = false
+}
+
 resource "aws_db_instance" "rds_instance" {
   identifier           = var.db_identifier
   engine               = var.db_engine
@@ -44,9 +50,20 @@ resource "aws_db_instance" "rds_instance" {
   username             = var.db_username
   password             = var.db_password
   skip_final_snapshot  = true
-  publicly_accessible = true # Note: Not recommended for production
+  publicly_accessible = var.db_publicly_accessible
+
+  db_subnet_group_name = aws_db_subnet_group.rds_subnet_group.name
+  vpc_security_group_ids = [aws_security_group.rds_sg.id]
 
   tags = {
     Name = var.db_identifier
   }
+}
+
+output "db_identifier" {
+  value = aws_db_instance.rds_instance.identifier
+}
+
+output "db_instance_address" {
+  value = aws_db_instance.rds_instance.address
 }

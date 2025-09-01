@@ -7,21 +7,16 @@ resource "aws_instance" "ec2" {
     ebs_optimized = var.ebs_optimized
     instance_type = var.ec2_type
     user_data     = base64encode(data.template_file.init.rendered)
-    iam_instance_profile = aws_iam_role.iam_role.name
-    volume_tags = {
-      "Name" = format("%s%s","volume for",var.ec2_name)
-    }
+    iam_instance_profile = aws_iam_instance_profile.ec2_instance_profile.name
+    associate_public_ip_address = false
+    
     tags = {
       "Name" = format("%s",var.ec2_name)
     }
-lifecycle {
-  ignore_changes = [ private_ip,vpc_security_group_ids,root_block_device,ebs_block_device ]
-}
 
-network_interface {
-    network_interface_id = aws_network_interface.ec2_nic.id
-    device_index = 0
-}
+
+    subnet_id = local.subnet_id
+    vpc_security_group_ids = [aws_security_group.ec2_sg.id]
 
 root_block_device {
   volume_size = var.vol1_root_size
@@ -35,4 +30,12 @@ ebs_block_device {
   volume_type = "gp2"
 }
 
+}
+
+output "instance_id" {
+  value = aws_instance.ec2.id
+}
+
+output "instance_ip" {
+  value = aws_instance.ec2.private_ip
 }

@@ -2,6 +2,9 @@ from python_terraform import Terraform, IsNotFlagged
 import os
 import boto3
 import re
+import shutil
+import json
+import subprocess
 
 def _run_terraform_apply(resource_dir: str, tfvars_path: str):
     terraform = Terraform(working_dir=resource_dir)
@@ -17,8 +20,38 @@ def _run_terraform_apply(resource_dir: str, tfvars_path: str):
     )
     if return_code != 0:
         raise Exception(f"Terraform apply failed: {stderr}\nStdout: {stdout}")
-    print("Terraform apply complete.")
-    return stdout
+    print("Terraform apply complete. Fetching outputs...")
+
+    try:
+        # Use subprocess to get the output as JSON
+        result = subprocess.run(
+            ["terraform", "output", "-json"],
+            cwd=resource_dir,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        stdout_str = result.stdout
+        stderr_str = result.stderr
+
+        if not stdout_str.strip():
+            raise Exception(f"Terraform output is empty. No resources may have been created or there was an issue fetching outputs.\nRaw stderr: {stderr_str}")
+
+        # Parse the JSON output into a Python dictionary
+        parsed_output = json.loads(stdout_str)
+        # Extract the 'value' from each output
+        result = {key: data['value'] for key, data in parsed_output.items()}
+        return result
+
+    except subprocess.CalledProcessError as e:
+        error_message = f"'terraform output -json' failed with exit code {e.returncode}\nStdout: {e.stdout}\nStderr: {e.stderr}"
+        raise Exception(error_message)
+    except json.JSONDecodeError as e:
+        error_message = f"Failed to parse Terraform JSON output: {e}\nRaw stdout: {stdout_str}\nRaw stderr: {stderr_str}"
+        raise Exception(error_message)
+    except Exception as e: # Catch any other potential errors during processing
+        error_message = f"Error processing Terraform output: {e}\nRaw stdout: {stdout_str}\nRaw stderr: {stderr_str}"
+        raise Exception(error_message)
 
 def _run_terraform_destroy(resource_dir: str, tfvars_path: str):
     terraform = Terraform(working_dir=resource_dir)
@@ -35,8 +68,9 @@ def _run_terraform_destroy(resource_dir: str, tfvars_path: str):
     if return_code != 0:
         raise Exception(f"Terraform destroy failed: {stderr}\nStdout: {stdout}")
     
-    if os.path.exists(tfvars_path):
-        os.remove(tfvars_path)
+    # Clean up the instance directory
+    if os.path.isdir(resource_dir):
+        shutil.rmtree(resource_dir)
         
     print("Resource destroyed successfully.")
     return "Resource destroyed successfully."
@@ -57,23 +91,61 @@ def _validate_volume_type(volume_type: str) -> bool:
     valid_volume_types = ["gp2", "gp3", "io1", "io2", "st1", "sc1", "standard"]
     return volume_type in valid_volume_types
 
-def create_ec2(ec2_name: str,vol1_root_size: int,vol1_volume_type: str,ec2_ebs2_data_size: int,ec2_ami: str, ec2_availabilityzone: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_ec2_{ec2_name}.tfvars')
+def create_ec2(ec2_name: str, ec2_type: str, vol1_root_size: int, vol1_volume_type: str, ec2_ebs2_data_size: int, ec2_ami: str, ec2_availabilityzone: str):
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, ec2_name)
+    
+    # Create a new directory for the instance
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+    
+    # Copy template files to the new instance directory
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_ec2_{ec2_name}.tfvars')
     with open(tfvars_path,'w') as f:
         f.write(f'ec2_name = "{ec2_name}"\n')
+        f.write(f'ec2_type = "{ec2_type}"\n')
         f.write(f'vol1_root_size = {vol1_root_size}\n')
         f.write(f'vol1_volume_type = "{vol1_volume_type}"\n')
         f.write(f'ec2_ebs2_data_size = {ec2_ebs2_data_size}\n')
         f.write(f'ec2_ami = "{ec2_ami}"\n')
         f.write(f'ec2_availabilityzone = "{ec2_availabilityzone}"\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+        
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_ec2 function
+    instance_id = tf_outputs.get('instance_id')
+    if not instance_id:
+        raise Exception("Failed to get instance ID from Terraform output.")
+
+    ec2 = boto3.client('ec2')
+    response = ec2.describe_instances(InstanceIds=[instance_id])
+    instance = response['Reservations'][0]['Instances'][0]
+
+    return {
+        'InstanceId': instance_id,
+        'Name': ec2_name,
+        'State': instance['State']['Name'],
+        'instance_ip': instance.get('PrivateIpAddress', 'N/A')
+    }
+
 
 def update_ec2_volume_size(instance_id: str, new_volume_size: int):
     details = get_ec2_details(instance_id)
     ec2_name = details['ec2_name']
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_ec2_{ec2_name}.tfvars')
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2', ec2_name))
+    tfvars_path = os.path.join(instance_dir, f'terraform_ec2_{ec2_name}.tfvars')
+
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot update instance '{ec2_name}'. Directory not found.")
 
     # Update the volume size in the tfvars file
     with open(tfvars_path, 'w') as f:
@@ -84,18 +156,52 @@ def update_ec2_volume_size(instance_id: str, new_volume_size: int):
         f.write(f'ec2_ami = "{details['ec2_ami']}"\n')
         f.write(f'ec2_availabilityzone = "{details['ec2_availabilityzone']}"\n')
     
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    return _run_terraform_apply(instance_dir, tfvars_path)
 
 def create_s3_bucket(bucket_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 's3'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_s3_{bucket_name}.tfvars')
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 's3'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, bucket_name)
+    
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+    
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_s3_{bucket_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'bucket_name = "{bucket_name}"\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
 
-def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_instance_class: str, allocated_storage: int, db_username: str, db_password: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'rds'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_rds_{db_identifier}.tfvars')
+    # Standardize the output to match the list_s3_buckets function
+    return {
+        'Name': tf_outputs.get('bucket_name', bucket_name) # Use output if available, else fallback to input
+    }
+
+def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_instance_class: str, allocated_storage: int, db_username: str, db_password: str, db_publicly_accessible: str):
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'rds'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, db_identifier)
+    
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+    
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_rds_{db_identifier}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'db_identifier = "{db_identifier}"\n')
         f.write(f'db_engine = "{db_engine}"\n')
@@ -104,47 +210,142 @@ def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_in
         f.write(f'allocated_storage = {allocated_storage}\n')
         f.write(f'db_username = "{db_username}"\n')
         f.write(f'db_password = "{db_password}"\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+        f.write(f'db_publicly_accessible = {str(db_publicly_accessible.lower() == "yes").lower()}\n')
+    
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_rds_instances function
+    rds = boto3.client('rds')
+    response = rds.describe_db_instances(DBInstanceIdentifier=db_identifier)
+    instance = response['DBInstances'][0]
+
+    return {
+        'DBInstanceIdentifier': instance['DBInstanceIdentifier'],
+        'DBInstanceStatus': instance['DBInstanceStatus']
+    }
 
 def create_dynamodb(table_name: str, hash_key_name: str, hash_key_type: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'dynamodb'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_dynamodb_{table_name}.tfvars')
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'dynamodb'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, table_name)
+    
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+    
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_dynamodb_{table_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'dynamodb_table_name = "{table_name}"\n')
         f.write(f'dynamodb_hash_key_name = "{hash_key_name}"\n')
         f.write(f'dynamodb_hash_key_type = "{hash_key_type}"\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_dynamodb_tables function
+    return {
+        'TableName': tf_outputs.get('dynamodb_table_name', table_name) # Use output if available, else fallback to input
+    }
 
 def create_iam_user(user_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_user_{user_name}.tfvars')
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, f"user_{user_name}")
+    
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+    
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_user_{user_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'iam_user_name = "{user_name}"\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_iam_users function
+    result = {
+        'UserName': tf_outputs.get('iam_user_name', user_name) # Use output if available, else fallback to input
+    }
+    return result
 
 def create_iam_role(role_name: str):
-    print(f"DEBUG: create_iam_role - role_name: '{role_name}'") # DEBUG PRINT
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_role_{role_name}.tfvars')
-    print(f"DEBUG: create_iam_role - tfvars_path: '{tfvars_path}'") # DEBUG PRINT
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, f"role_{role_name}")
+
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+            
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_role_{role_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'iam_role_name = "{role_name}"\n')
-    # Read back the content to verify
-    with open(tfvars_path, 'r') as f:
-        content = f.read()
-        print(f"DEBUG: create_iam_role - tfvars content: '{content}'") # DEBUG PRINT
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_iam_roles function
+    return {
+        'RoleName': tf_outputs.get('iam_role_name', role_name) # Use output if available, else fallback to input
+    }
 
 def create_iam_policy(policy_name: str, policy_description: str, policy_document: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_policy_{policy_name}.tfvars')
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
+    template_dir = os.path.join(base_dir, 'maincode')
+    instance_dir = os.path.join(base_dir, f"policy_{policy_name}")
+
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir)
+
+    for item in os.listdir(template_dir):
+        s = os.path.join(template_dir, item)
+        d = os.path.join(instance_dir, item)
+        if os.path.isdir(s):
+            shutil.copytree(s, d, symlinks=True, ignore=None)
+        else:
+            shutil.copy2(s, d)
+
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_policy_{policy_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'iam_policy_name = "{policy_name}"\n')
         f.write(f'iam_policy_description = "{policy_description}"\n')
         f.write(f'iam_policy_document = <<-EOT\n')
         f.write(f'{policy_document}\n')
         f.write(f'EOT\n')
-    return _run_terraform_apply(resource_dir, tfvars_path)
+    
+    tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
+
+    # Standardize the output to match the list_iam_policies function
+    iam = boto3.client('iam')
+    response = iam.list_policies(Scope='Local')
+    policy_arn = None
+    for policy in response['Policies']:
+        if policy['PolicyName'] == policy_name:
+            policy_arn = policy['Arn']
+            break
+
+    return {
+        'PolicyName': tf_outputs.get('iam_policy_name', policy_name),
+        'Arn': policy_arn if policy_arn else 'N/A'
+    }
 
 def get_ec2_details(instance_id: str):
     ec2 = boto3.client('ec2')
@@ -189,65 +390,63 @@ def get_ec2_details(instance_id: str):
 def destroy_ec2(instance_id: str):
     details = get_ec2_details(instance_id)
     ec2_name = details['ec2_name']
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_ec2_{ec2_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2', ec2_name))
+    tfvars_path = os.path.join(instance_dir, f'terraform_ec2_{ec2_name}.tfvars')
+
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy instance '{ec2_name}'. Directory not found.")
+
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def destroy_s3_bucket(bucket_name: str):
-    s3 = boto3.client('s3')
-    try:
-        # List and delete all object versions
-        paginator = s3.get_paginator('list_object_versions')
-        for page in paginator.paginate(Bucket=bucket_name):
-            if 'Versions' in page:
-                for obj_version in page['Versions']:
-                    s3.delete_object(Bucket=bucket_name, Key=obj_version['Key'], VersionId=obj_version['VersionId'])
-            if 'DeleteMarkers' in page:
-                for del_marker in page['DeleteMarkers']:
-                    s3.delete_object(Bucket=bucket_name, Key=del_marker['Key'], VersionId=del_marker['VersionId'])
-        
-        # List and delete all objects (for non-versioned buckets or after versions are cleared)
-        paginator = s3.get_paginator('list_objects_v2')
-        for page in paginator.paginate(Bucket=bucket_name):
-            if 'Contents' in page:
-                objects = [{'Key': obj['Key']} for obj in page['Contents']]
-                s3.delete_objects(Bucket=bucket_name, Delete={'Objects': objects})
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 's3', bucket_name))
+    tfvars_path = os.path.join(instance_dir, f'terraform_s3_{bucket_name}.tfvars')
 
-    except Exception as e:
-        # If the bucket doesn't exist or other error during emptying, proceed to destroy via terraform
-        # as terraform destroy will handle non-existent resources gracefully.
-        print(f"Warning: Could not empty S3 bucket {bucket_name} using boto3: {e}. Attempting Terraform destroy anyway.")
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy S3 bucket '{bucket_name}'. Directory not found.")
 
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 's3'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_s3_{bucket_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def destroy_rds(db_identifier: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'rds'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_rds_{db_identifier}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'rds', db_identifier))
+    tfvars_path = os.path.join(instance_dir, f'terraform_rds_{db_identifier}.tfvars')
+
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy RDS instance '{db_identifier}'. Directory not found.")
+
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def destroy_dynamodb(table_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'dynamodb'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_dynamodb_{table_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'dynamodb', table_name))
+    tfvars_path = os.path.join(instance_dir, f'terraform_dynamodb_{table_name}.tfvars')
+
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy DynamoDB table '{table_name}'. Directory not found.")
+
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 
 
 def destroy_iam_user(user_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_user_{user_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam', f"user_{user_name}"))
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_user_{user_name}.tfvars')
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy IAM User '{user_name}'. Directory not found.")
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def destroy_iam_role(role_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_role_{role_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam', f"role_{role_name}"))
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_role_{role_name}.tfvars')
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy IAM Role '{role_name}'. Directory not found.")
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def destroy_iam_policy(policy_name: str):
-    resource_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
-    tfvars_path = os.path.join(resource_dir, f'terraform_iam_policy_{policy_name}.tfvars')
-    return _run_terraform_destroy(resource_dir, tfvars_path)
+    instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam', f"policy_{policy_name}"))
+    tfvars_path = os.path.join(instance_dir, f'terraform_iam_policy_{policy_name}.tfvars')
+    if not os.path.exists(instance_dir):
+        raise Exception(f"Cannot destroy IAM Policy '{policy_name}'. Directory not found.")
+    return _run_terraform_destroy(instance_dir, tfvars_path)
 
 def list_ec2():
     ec2 = boto3.client('ec2')
@@ -262,7 +461,12 @@ def list_ec2():
                     if tag['Key'] == 'Name':
                         instance_name = tag['Value']
                         break
-                instances.append({'InstanceId': instance_id, 'Name': instance_name, 'State': instance['State']['Name']})
+                instances.append({
+                    'InstanceId': instance_id, 
+                    'Name': instance_name, 
+                    'State': instance['State']['Name'],
+                    'instance_ip': instance.get('PublicIpAddress', 'N/A')
+                })
         return instances
     except Exception as e:
         raise Exception(f"Failed to list EC2 instances: {e}")

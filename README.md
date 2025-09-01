@@ -7,18 +7,29 @@ The AWS AI Manager is a Streamlit-based conversational AI application designed t
 ## Features
 
 *   **Conversational Interface**: Manage AWS resources through a user-friendly chat interface with robust natural language understanding.
-*   **Resource Management**: Create, destroy, and list various AWS resources, including:
-    *   EC2 Instances
+*   **Enhanced Resource Management**: Create, destroy, list, and modify various AWS resources, including:
+    *   EC2 Instances (with root and data volumes, and now correctly handles private IPs)
     *   S3 Buckets
-    *   RDS Databases
+    *   RDS Databases (now supports public/private accessibility configuration)
     *   DynamoDB Tables
-    *   IAM Users, Roles, and Policies
+    *   IAM Users, Roles, and Policies (all resource types now have comprehensive parameter modification support)
 *   **AI-Powered Assistance**:
+    *   **Intelligent Intent Recognition**: AI understands context and translates requests into AWS actions.
+    *   **Automated Terraform Provisioning**: Seamlessly generates and applies Infrastructure as Code (IaC) for consistent deployments.
     *   **Cost Estimation**: Get estimated costs for your AWS resource requests.
     *   **Error Diagnosis**: Receive AI-driven insights and suggestions for resolving AWS-related errors.
+    *   **Improved Error Handling & Retry**: Robust error handling with the ability to modify parameters and retry failed resource creation attempts.
 *   **Session Persistence**: Your conversation history and application state are saved, allowing you to resume where you left off even if the application restarts.
 *   **Detailed Progress Indicators**: Provides real-time updates during long-running Terraform operations.
-*   **Resource Modification**: Currently supports modifying the root volume size of existing EC2 instances.
+*   **Resource Modification**: Supports modifying parameters of existing resources (e.g., EC2 instance volume size).
+
+## Security Considerations
+
+**WARNING: Insecure RDS Security Group Configuration**
+
+The current Terraform configuration for RDS instances (`terraformfile/rds/maincode/net.tf`) creates a security group that allows **all inbound TCP traffic from `0.0.0.0/0` (any IP address) on all ports**. This is highly insecure and **NOT recommended for production environments**. It is intended for demonstration or testing purposes only.
+
+**Before deploying to a production environment, you MUST modify the `ingress` rules in `terraformfile/rds/maincode/net.tf` to restrict inbound traffic to known IP addresses and specific ports.**
 
 ## Setup and Usage
 
@@ -52,7 +63,7 @@ The AWS AI Manager is a Streamlit-based conversational AI application designed t
     pip install -r requirements.txt
     ```
 5.  **Configure Perplexity AI API Key**:
-    Create a file named `.env` in the root of the `AWS_AI_MANAGER` directory and add your Perplexity AI API key:
+    The application uses the Perplexity AI API for its intelligent responses. Create a file named `.env` in the root of the `AWS_AI_MANAGER` directory and add your Perplexity AI API key:
     ```
     PERPLEXITY_API_KEY="your_perplexity_api_key_here"
     ```

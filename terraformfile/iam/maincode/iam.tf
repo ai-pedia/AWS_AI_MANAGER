@@ -70,3 +70,15 @@ resource "aws_iam_policy" "iam_policy" {
   description = var.iam_policy_description
   policy      = var.iam_policy_document
 }
+
+output "iam_user_name" {
+  value = var.iam_user_name
+}
+
+output "iam_role_name" {
+  value = var.iam_role_name
+}
+
+output "iam_policy_name" {
+  value = var.iam_policy_name
+}

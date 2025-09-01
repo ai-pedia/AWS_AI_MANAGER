@@ -44,6 +44,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "conversation_flow" not in st.session_state:
     st.session_state.conversation_flow = {"active": False}
+if "history" not in st.session_state:
+    st.session_state.history = []
+if "aliases" not in st.session_state:
+    st.session_state.aliases = {}
 
 # Display welcome message if chat history is empty
 if not st.session_state.messages:
