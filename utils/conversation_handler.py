@@ -7,6 +7,13 @@ from services import terraform_service
 from services.terraform_service import _validate_ami_id, _validate_instance_type, _validate_volume_type
 from utils.ai_client import send_to_perplexity
 
+# Import enhanced AI conversation modules
+from utils.intent_classifier import classify_intent, get_intent_suggestions
+from utils.context_manager import get_context, update_context, add_message_to_history, get_recent_history, learn_from_interaction, get_smart_defaults
+from utils.parameter_extractor import extract_parameters, get_missing_parameters, suggest_parameter_values
+from utils.suggestion_engine import get_proactive_suggestions, get_contextual_help, get_ai_powered_suggestions
+from utils.error_recovery import analyze_error, get_error_context_help, generate_error_report
+
 # --- Parameter Definitions for Resource Creation ---
 RESOURCE_PARAMS = {
     "ec2": [
@@ -169,40 +176,64 @@ def get_availability_zones():
         st.session_state.messages.append({"role": "assistant", "content": f"Error fetching availability zones: {e}"})
         return []
 
-def diagnose_error(error_message, traceback_str):
-    st.session_state.messages.append({"role": "assistant", "content": "An error occurred. Analyzing the issue..."})
+def diagnose_error(error_message, traceback_str, intent="", parameters=None, session_id="default_session"):
+    """
+    Enhanced error diagnosis using AI-powered analysis and recovery suggestions.
+    """
+    st.session_state.messages.append({"role": "assistant", "content": "🔍 An error occurred. Analyzing the issue..."})
 
-    # Provide specific advice for common errors
-    if "InvalidParameterCombination" in error_message:
-        user_facing_error_message = "It seems you've provided an unsupported combination of parameters. Please check the AWS documentation for valid combinations (e.g., supported engine versions for your chosen database engine and instance class)."
-        if "Cannot find version" in error_message:
-            user_facing_error_message += " Specifically, the database engine version you selected might not be available for the chosen engine or region."
-    elif "Error: Invalid AWS Access Key ID" in error_message or "Error: InvalidClientTokenId" in error_message:
-        user_facing_error_message = "Your AWS credentials seem to be invalid. Please check your AWS Access Key ID and Secret Access Key."
-    elif "Error: User has no access to iam:ListAccountAliases" in error_message:
-        user_facing_error_message = "Your IAM user does not have the required permissions. Please ensure your user has the `iam:ListAccountAliases` permission."
-    else:
-        user_facing_error_message = error_message
+    # Use enhanced error analysis
+    error_analysis = analyze_error(error_message, traceback_str, intent, parameters or {})
 
-    st.session_state.messages.append({"role": "assistant", "content": user_facing_error_message})
+    # Display error severity and type
+    severity_emoji = {"high": "🚨", "medium": "⚠️", "low": "ℹ️"}.get(error_analysis['severity'], "⚠️")
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": f"{severity_emoji} **{error_analysis['error_type'].title()} Error** (Severity: {error_analysis['severity'].title()})"
+    })
 
-    # Add a button to show the full traceback
-    with st.expander("Show Full Error Log"):
+    # Display root cause if available
+    if error_analysis.get('root_cause'):
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": f"**Root Cause:** {error_analysis['root_cause']}"
+        })
+
+    # Display recovery steps
+    if error_analysis.get('recovery_steps'):
+        recovery_text = "**Recovery Steps:**\n" + "\n".join([f"{i+1}. {step}" for i, step in enumerate(error_analysis['recovery_steps'])])
+        st.session_state.messages.append({"role": "assistant", "content": recovery_text})
+
+    # Display preventive measures
+    if error_analysis.get('preventive_measures'):
+        preventive_text = "**Preventive Measures:**\n" + "\n".join([f"• {measure}" for measure in error_analysis['preventive_measures']])
+        st.session_state.messages.append({"role": "assistant", "content": preventive_text})
+
+    # Get contextual help
+    help_messages = get_error_context_help(error_analysis)
+    if help_messages:
+        help_text = "**Additional Help:**\n" + "\n".join([f"• {msg}" for msg in help_messages])
+        st.session_state.messages.append({"role": "assistant", "content": help_text})
+
+    # Add detailed error log in expander
+    with st.expander("🔧 Show Full Error Details"):
         st.code(traceback_str)
 
-    # Ask the AI for a more focused diagnosis
-    diagnosis_prompt = f"""An error occurred during an AWS operation. Please provide a concise diagnosis and a step-by-step solution.
-    Error Message: {error_message}
-    Traceback: {traceback_str}
-    """
-    try:
-        diagnosis_text, _ = send_to_perplexity(diagnosis_prompt)
-        if diagnosis_text:
-            st.session_state.messages.append({"role": "assistant", "content": f"**AI Diagnosis:**\n{diagnosis_text}"})
-        else:
-            st.session_state.messages.append({"role": "assistant", "content": "Failed to get AI diagnosis."})
-    except Exception as e:
-        st.session_state.messages.append({"role": "assistant", "content": f"Failed to get AI diagnosis: {e}"})
+        # Show comprehensive error report
+        if intent and parameters:
+            error_report = generate_error_report(error_message, traceback_str, intent, parameters)
+            st.markdown("### 📋 Complete Error Report")
+            st.markdown(error_report)
+
+    # Update conversation context with error information
+    update_context(session_id, error_context=error_analysis, conversation_state="error")
+
+    # Provide retry option for recoverable errors
+    if error_analysis['severity'] in ['low', 'medium']:
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": "💡 This error appears recoverable. You can try 'retry' to attempt the operation again, or 'modify' to change parameters."
+        })
 
 
 def _validate_db_identifier(identifier: str) -> bool:
@@ -253,7 +284,62 @@ def _find_resource_by_identifier(user_input, resources, resource_type):
         # Check against the actual ID (e.g., InstanceId)
         if destroy_id_key and resource.get(destroy_id_key, '').lower() == user_input.lower():
             return resource
-            
+
+    return None
+
+def _find_parameter_by_input(user_input, resource_type, current_params):
+    """Find parameter name by user input (supports aliases and fuzzy matching)"""
+    user_input_lower = user_input.lower().strip()
+
+    # Get aliases for this resource type
+    aliases = PARAMETER_ALIASES.get(resource_type, {})
+
+    # First, check exact aliases
+    for alias, param_name in aliases.items():
+        if alias == user_input_lower:
+            return param_name
+
+    # Check if user input matches parameter name directly
+    for param_name in current_params.keys():
+        if param_name.lower() == user_input_lower:
+            return param_name
+
+    # Fuzzy matching - check if user input contains key parts of parameter names
+    param_keywords = {
+        # EC2 parameters
+        'ec2_name': ['name', 'instance name', 'server name', 'ec2 name'],
+        'ec2_ami': ['ami', 'ami id', 'image', 'image id', 'amazon machine image'],
+        'ec2_type': ['type', 'instance type', 'size', 'instance size', 'machine type'],
+        'ec2_availabilityzone': ['zone', 'availability zone', 'az', 'region zone'],
+        'vol1_root_size': ['root', 'root size', 'volume size', 'disk size', 'root disk', 'boot volume'],
+        'vol1_volume_type': ['volume type', 'disk type', 'storage type', 'root volume type'],
+        'ec2_ebs2_data_size': ['data', 'data size', 'data volume', 'additional storage', 'ebs size'],
+
+        # S3 parameters
+        'bucket_name': ['bucket', 'bucket name', 's3 bucket', 'storage bucket'],
+
+        # RDS parameters
+        'db_identifier': ['identifier', 'db name', 'database name', 'db identifier', 'rds name'],
+        'db_engine': ['engine', 'database engine', 'db engine', 'rds engine'],
+        'db_engine_version': ['version', 'engine version', 'db version', 'rds version'],
+        'db_instance_class': ['class', 'instance class', 'db class', 'rds class', 'size'],
+        'allocated_storage': ['storage', 'allocated storage', 'db storage', 'disk size'],
+        'db_username': ['username', 'user', 'db user', 'database user', 'admin user'],
+        'db_password': ['password', 'db password', 'database password', 'admin password'],
+        'db_publicly_accessible': ['public', 'publicly accessible', 'public access', 'internet access'],
+
+        # DynamoDB parameters
+        'table_name': ['table', 'table name', 'dynamodb table'],
+        'hash_key_name': ['hash key', 'key name', 'primary key', 'partition key'],
+        'hash_key_type': ['key type', 'hash key type', 'attribute type', 'data type']
+    }
+
+    for param_name, keywords in param_keywords.items():
+        if param_name in current_params:  # Only suggest parameters that are actually in use
+            for keyword in keywords:
+                if keyword in user_input_lower:
+                    return param_name
+
     return None
 
 def handle_get_resource_info(attribute):
@@ -299,10 +385,15 @@ def execute_user_action(user_message):
             user_message = st.session_state.aliases[user_message]
         st.session_state.history.append(user_message)
 
+        # Add message to context history for enhanced AI processing
+        session_id = st.session_state.get('session_id', 'default_session')
+        user_msg = {"role": "user", "content": user_message}
+        add_message_to_history(session_id, user_msg)
+
     if st.session_state.conversation_flow.get("active"):
         handle_active_flow(user_message)
     else:
-        handle_intent_recognition(user_message)
+        handle_enhanced_intent_recognition(user_message)
 
 def handle_active_flow(user_message):
     flow = st.session_state.conversation_flow
@@ -317,20 +408,123 @@ def handle_active_flow(user_message):
     elif flow_type == "modify_resource":
         handle_modify_resource_flow(user_message)
 
+def _show_resource_preview(flow):
+    """Show a preview of the resource configuration before creation"""
+    resource_type = flow["resource_type"]
+    params = flow["params"]
+
+    # Create a human-readable preview
+    preview_text = f"## 📋 **{resource_type.upper()} Resource Preview**\n\n"
+
+    # Map parameter names to human-readable labels for all resource types
+    param_labels = {
+        # EC2 parameters
+        'ec2_name': 'Instance Name',
+        'ec2_ami': 'AMI ID',
+        'ec2_type': 'Instance Type',
+        'ec2_availabilityzone': 'Availability Zone',
+        'vol1_root_size': 'Root Volume Size (GB)',
+        'vol1_volume_type': 'Root Volume Type',
+        'ec2_ebs2_data_size': 'Data Volume Size (GB)',
+
+        # S3 parameters
+        'bucket_name': 'Bucket Name',
+
+        # RDS parameters
+        'db_identifier': 'Database Identifier',
+        'db_engine': 'Database Engine',
+        'db_engine_version': 'Engine Version',
+        'db_instance_class': 'Instance Class',
+        'allocated_storage': 'Storage (GB)',
+        'db_username': 'Username',
+        'db_password': 'Password',
+        'db_publicly_accessible': 'Publicly Accessible',
+
+        # DynamoDB parameters
+        'table_name': 'Table Name',
+        'hash_key_name': 'Hash Key Name',
+        'hash_key_type': 'Hash Key Type'
+    }
+
+    preview_text += "**Configuration:**\n"
+    for param_key, param_value in params.items():
+        label = param_labels.get(param_key, param_key.replace('_', ' ').title())
+
+        # Mask sensitive information
+        if 'password' in param_key.lower():
+            display_value = "••••••••"
+        else:
+            display_value = param_value
+
+        preview_text += f"- **{label}:** {display_value}\n"
+
+    # Resource-specific warnings and notes
+    preview_text += "\n**⚠️ Important Notes:**\n"
+
+    if resource_type == 'ec2':
+        preview_text += "- 💰 **EC2 instances will incur charges while running**\n"
+        preview_text += "- 🔍 Make sure the AMI ID is valid for your region\n"
+        preview_text += "- 💾 Root volume will be created with the specified type and size\n"
+
+    elif resource_type == 'rds':
+        preview_text += "- 💰 **RDS instances will incur charges while running**\n"
+        preview_text += "- 🔐 Database credentials will be stored securely\n"
+        preview_text += "- 📊 Storage costs apply based on allocated size\n"
+        preview_text += "- 🌐 Consider security group and subnet settings\n"
+
+    elif resource_type == 's3':
+        preview_text += "- 🌍 **S3 bucket names are globally unique**\n"
+        preview_text += "- 💰 Standard S3 charges apply for storage, requests, and data transfer\n"
+        preview_text += "- 🔒 Consider enabling versioning and encryption for production use\n"
+        preview_text += "- 📍 Bucket will be created in your default region\n"
+
+    elif resource_type == 'dynamodb':
+        preview_text += "- 💰 **DynamoDB charges based on throughput and storage**\n"
+        preview_text += "- 🔑 Primary key configuration affects performance\n"
+        preview_text += "- 📈 Consider read/write capacity settings for cost optimization\n"
+
+    # Cost estimation if possible
+    if resource_type == 'ec2' and 'ec2_type' in params:
+        instance_type = params.get('ec2_type', '').lower()
+        if 't3.micro' in instance_type:
+            preview_text += "- 💵 **Estimated cost:** ~$8-10/month (t3.micro, minimal usage)\n"
+        elif 't3.small' in instance_type:
+            preview_text += "- 💵 **Estimated cost:** ~$15-20/month (t3.small, minimal usage)\n"
+
+    elif resource_type == 'rds' and 'db_instance_class' in params:
+        db_class = params.get('db_instance_class', '').lower()
+        if 'db.t3.micro' in db_class:
+            preview_text += "- 💵 **Estimated cost:** ~$15-25/month (db.t3.micro, minimal usage)\n"
+
+    preview_text += "\n**🚀 Ready to create this resource?**\n"
+    preview_text += "**Type 'yes' to create, 'modify' to change parameters, or 'cancel' to abort.**"
+
+    st.session_state.messages.append({"role": "assistant", "content": preview_text})
+    flow["awaiting_confirmation"] = True
+
 def _execute_create_resource(flow):
     resource_type = flow["resource_type"]
+
+    # First, show preview if not already shown
+    if not flow.get("preview_shown"):
+        _show_resource_preview(flow)
+        flow["preview_shown"] = True
+        return
+
+    # If we get here, user has confirmed, so proceed with creation
     with st.spinner(f"Creating {resource_type.upper()}..."):
         try:
             if resource_type == "s3":
                 create_function = getattr(terraform_service, "create_s3_bucket")
             else:
                 create_function = getattr(terraform_service, f"create_{resource_type}")
-            
+
             # The create_function now returns a dictionary of the outputs
             outputs = create_function(**flow["params"])
             print(f"DEBUG: Outputs from create_function: {outputs}")
 
-            summary = f"{resource_type.upper()} created successfully!\n"
+            summary = f"✅ **{resource_type.upper()} created successfully!**\n\n"
+            summary += "**Resource Details:**\n"
             for key, val in outputs.items():
                 summary += f"- **{key}:** {val}\n"
 
@@ -343,19 +537,88 @@ def _execute_create_resource(flow):
             }
 
             flow["active"] = False
-            st.session_state.messages.append({"role": "assistant", "content": "Resource creation process completed."})
+            st.session_state.messages.append({"role": "assistant", "content": "🎉 Resource creation process completed successfully!"})
 
 
         except Exception as e:
-            st.session_state.messages.append({"role": "assistant", "content": f"Error creating {resource_type}: {e}"})
-            diagnose_error(f"Error creating {resource_type}", traceback.format_exc())
+            st.session_state.messages.append({"role": "assistant", "content": f"❌ Error creating {resource_type}: {e}"})
+            session_id = st.session_state.get('session_id', 'default_session')
+            diagnose_error(
+                f"Error creating {resource_type}",
+                traceback.format_exc(),
+                f"create_{resource_type}",
+                flow.get("params", {}),
+                session_id
+            )
             flow["error_occurred"] = True
-            st.session_state.messages.append({"role": "assistant", "content": "Please address the issue. Once you believe it is fixed, type 'retry' to attempt the resource creation again."})
+            st.session_state.messages.append({"role": "assistant", "content": "💡 **Recovery Options:**\n- Type 'retry' to attempt again\n- Type 'modify' to change parameters\n- Type 'cancel' to abort"})
 
 def handle_create_resource_flow(user_message):
     flow = st.session_state.conversation_flow
     resource_type = flow["resource_type"]
 
+    # Fix: Skip parameters that are already provided in the params dictionary
+    # This prevents asking for parameters that were already extracted from the initial message
+    if flow.get("current_param_index") is not None:
+        params = flow.get("params", {})
+        params_for_resource = RESOURCE_PARAMS.get(resource_type, [])
+
+        # Skip any parameters that are already provided
+        while (flow["current_param_index"] < len(params_for_resource) and
+               params_for_resource[flow["current_param_index"]]["name"] in params):
+            flow["current_param_index"] += 1
+
+    # Handle confirmation step
+    if flow.get("awaiting_confirmation"):
+        if user_message.lower() in ['yes', 'y', 'confirm', 'proceed']:
+            flow["awaiting_confirmation"] = False
+            flow["confirmed"] = True
+            _execute_create_resource(flow)
+        elif user_message.lower() in ['modify', 'change', 'edit']:
+            flow["awaiting_confirmation"] = False
+            flow["awaiting_param_modification_decision"] = True
+            st.session_state.messages.append({"role": "assistant", "content": "🔧 **Parameter Modification**\n\nWhich parameter would you like to change? You can specify:\n- Parameter name (e.g., 'instance type', 'volume size')\n- Or type 'list' to see all current parameters"})
+        elif user_message.lower() in ['cancel', 'abort', 'no', 'n']:
+            flow["active"] = False
+            st.session_state.messages.append({"role": "assistant", "content": "❌ Resource creation cancelled."})
+        else:
+            st.session_state.messages.append({"role": "assistant", "content": "Please respond with:\n- **'yes'** to create the resource\n- **'modify'** to change parameters\n- **'cancel'** to abort"})
+        return
+
+    # Handle parameter modification
+    if flow.get("awaiting_param_modification_decision"):
+        if user_message.lower() in ['list', 'show', 'current']:
+            # Show current parameters
+            current_params = "\n".join([f"- **{k.replace('_', ' ').title()}:** {v}" for k, v in flow["params"].items()])
+            st.session_state.messages.append({"role": "assistant", "content": f"📋 **Current Parameters:**\n{current_params}\n\nWhich parameter would you like to change?"})
+            return
+        elif user_message.lower() in ['done', 'finished', 'proceed']:
+            flow["awaiting_param_modification_decision"] = False
+            _show_resource_preview(flow)  # Show preview again
+            return
+        else:
+            # Try to match parameter
+            param_to_modify = _find_parameter_by_input(user_message, resource_type, flow["params"])
+            if param_to_modify:
+                flow["param_to_modify"] = param_to_modify
+                flow["awaiting_param_modification_decision"] = False
+                flow["awaiting_new_param_value"] = True
+                current_value = flow["params"].get(param_to_modify, "Not set")
+                st.session_state.messages.append({"role": "assistant", "content": f"Current value for **{param_to_modify.replace('_', ' ').title()}**: {current_value}\n\nWhat is the new value?"})
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": "❌ Parameter not found. Please specify a valid parameter name or type 'list' to see all parameters."})
+            return
+
+    if flow.get("awaiting_new_param_value"):
+        param_to_modify = flow["param_to_modify"]
+        flow["params"][param_to_modify] = user_message.strip()
+        flow["awaiting_new_param_value"] = False
+        flow["param_to_modify"] = None
+        st.session_state.messages.append({"role": "assistant", "content": f"✅ Parameter updated! **{param_to_modify.replace('_', ' ').title()}** is now: {user_message.strip()}\n\nWould you like to modify another parameter? (yes/no)"})
+        flow["awaiting_param_modification_decision"] = True
+        return
+
+    # Handle error recovery
     if flow.get("error_occurred"):
         if flow.get("awaiting_param_modification_decision"):
             if "yes" in user_message.lower():
@@ -391,23 +654,38 @@ def handle_create_resource_flow(user_message):
             flow["awaiting_new_param_value"] = False
             flow["param_to_modify"] = None
             st.session_state.messages.append({"role": "assistant", "content": "Parameter updated. Would you like to modify another parameter? (yes/no)"})
-            flow["awaiting_param_modification_decision"] = True # Loop back to see if they want to change more
+            flow["awaiting_param_modification_decision"] = True
             return
 
         if user_message and 'retry' in user_message.lower():
             flow["awaiting_param_modification_decision"] = True
             st.session_state.messages.append({"role": "assistant", "content": "Would you like to modify any parameters before retrying? (yes/no)"})
+        elif user_message and 'cancel' in user_message.lower():
+            flow["active"] = False
+            flow["error_occurred"] = False
+            st.session_state.messages.append({"role": "assistant", "content": "❌ Resource creation cancelled."})
         else:
             st.session_state.messages.append({"role": "assistant", "content": "Please type 'retry' to continue or 'cancel' to stop."})
-        return
         return
 
     params_for_resource = RESOURCE_PARAMS.get(resource_type, [])
     param_idx = flow.get("current_param_index", 0)
 
     if user_message:
-        prev_param_name = params_for_resource[param_idx - 1]["name"]
-        
+        # Get the parameter that was actually asked for, not just the previous index
+        current_param_name = flow.get("current_param_name")
+        if not current_param_name and param_idx > 0:
+            current_param_name = params_for_resource[param_idx - 1]["name"]
+        elif not current_param_name:
+            # Fallback if no current_param_name is set
+            current_param_name = params_for_resource[param_idx]["name"] if param_idx < len(params_for_resource) else None
+
+        if not current_param_name:
+            st.session_state.messages.append({"role": "assistant", "content": "❌ Error: Could not determine which parameter to update. Please try again."})
+            return
+
+        prev_param_name = current_param_name
+
         # Handle dynamic version selection for RDS
         if resource_type == "rds" and flow.get("awaiting_version_selection"):
             try:
@@ -419,38 +697,44 @@ def handle_create_resource_flow(user_message):
                     del flow["supported_versions"] # Clean up
                 else:
                     st.session_state.messages.append({"role": "assistant", "content": "Invalid selection. Please choose a number from the list of available versions."})
-                    flow["current_param_index"] = param_idx - 1 
+                    flow["current_param_index"] = param_idx - 1
                     return
             except (ValueError, IndexError):
                 st.session_state.messages.append({"role": "assistant", "content": "Invalid input. Please enter a number corresponding to the desired version."})
-                flow["current_param_index"] = param_idx - 1 
+                flow["current_param_index"] = param_idx - 1
                 return
-        
+
+        # Validate parameters before storing them
+        validation_passed = True
+
         if resource_type == "rds" and prev_param_name == "db_identifier":
             if not _validate_db_identifier(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": "Invalid DB instance identifier. It must contain only lowercase letters, numbers, or hyphens, and cannot contain two consecutive hyphens. Please try again."})
-                flow["current_param_index"] = param_idx - 1 
-                return
+                validation_passed = False
 
         if resource_type == "ec2" and prev_param_name == "ec2_ami":
             if not _validate_ami_id(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": "Invalid AMI ID format. Please provide a valid AMI ID (e.g., ami-0abcdef1234567890)."})
-                flow["current_param_index"] = param_idx - 1
-                return
-        
+                validation_passed = False
+
         if resource_type == "ec2" and prev_param_name == "ec2_type":
             if not _validate_instance_type(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": "Invalid EC2 Instance Type. Please provide a valid instance type (e.g., t2.micro, m5.large)."})
-                flow["current_param_index"] = param_idx - 1
-                return
+                validation_passed = False
 
         if resource_type == "ec2" and prev_param_name == "vol1_volume_type":
             if not _validate_volume_type(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": "Invalid EBS Volume Type. Please provide a valid volume type (e.g., gp2, gp3, io1)."})
-                flow["current_param_index"] = param_idx - 1
-                return
-        
-        flow["params"][prev_param_name] = user_message
+                validation_passed = False
+
+        # Only store the parameter if validation passed
+        if validation_passed:
+            flow["params"][prev_param_name] = user_message
+            # Clear the current_param_name since we've successfully processed this parameter
+            flow["current_param_name"] = None
+        else:
+            # Validation failed, don't increment index and keep current_param_name for re-asking
+            return  # Don't continue if validation failed
 
     if param_idx < len(params_for_resource):
         param_info = params_for_resource[param_idx]
@@ -473,10 +757,27 @@ def handle_create_resource_flow(user_message):
             else:
                 st.session_state.messages.append({"role": "assistant", "content": param_info["prompt"]}) # Fallback if engine or instance_class not yet collected
         else:
-            st.session_state.messages.append({"role": "assistant", "content": param_info["prompt"]})
-        
+            # Store the current parameter name for later use when processing response
+            flow["current_param_name"] = param_info["name"]
+
+            # Check if this is an enhanced flow and provide suggestions
+            if flow.get("enhanced_flow") and flow.get("missing_params"):
+                param_name = param_info["name"]
+                if param_name in flow["missing_params"]:
+                    suggestions = suggest_parameter_values(param_name, resource_type, st.session_state.get('user_id', 'default_user'))
+                    if suggestions:
+                        suggestion_text = f"{param_info['prompt']}\nHere are some suggestions:\n" + "\n".join([f"- {sug}" for sug in suggestions])
+                        st.session_state.messages.append({"role": "assistant", "content": suggestion_text})
+                    else:
+                        st.session_state.messages.append({"role": "assistant", "content": param_info["prompt"]})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": param_info["prompt"]})
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": param_info["prompt"]})
+
         flow["current_param_index"] = param_idx + 1
     else:
+        # All parameters collected, show preview for confirmation
         _execute_create_resource(flow)
 
 def handle_destroy_resource_flow(user_message):
@@ -492,7 +793,7 @@ def handle_destroy_resource_flow(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": f"No {resource_type.upper()} resources found to destroy."})
                 flow["active"] = False
                 return
-            
+
             flow["resources"] = resources
             if len(resources) == 1:
                 flow["selected_resource"] = resources[0]
@@ -507,7 +808,14 @@ def handle_destroy_resource_flow(user_message):
                 flow["awaiting_selection"] = True
         except Exception as e:
             st.session_state.messages.append({"role": "assistant", "content": f"Error listing {resource_type}s: {e}"})
-            diagnose_error(f"Error listing {resource_type}s", traceback.format_exc())
+            session_id = st.session_state.get('session_id', 'default_session')
+            diagnose_error(
+                f"Error listing {resource_type}s",
+                traceback.format_exc(),
+                f"list_{resource_type}",
+                {},
+                session_id
+            )
             flow["active"] = False
         return
 
@@ -545,7 +853,14 @@ def handle_destroy_resource_flow(user_message):
                     st.session_state.messages.append({"role": "assistant", "content": f"{resource_type.upper()} destroyed successfully!\n{response}"})
                 except Exception as e:
                     st.session_state.messages.append({"role": "assistant", "content": f"Error destroying {resource_type.upper()}: {e}"})
-                    diagnose_error(f"Error destroying {resource_type.upper()}", traceback.format_exc())
+                    session_id = st.session_state.get('session_id', 'default_session')
+                    diagnose_error(
+                        f"Error destroying {resource_type.upper()}",
+                        traceback.format_exc(),
+                        f"destroy_{resource_type}",
+                        {"resource_id": flow["selected_resource"].get(RESOURCE_DESTROY_IDS[resource_type])},
+                        session_id
+                    )
                 finally:
                     flow["active"] = False
         elif "no" in user_message.lower():
@@ -567,7 +882,7 @@ def handle_modify_resource_flow(user_message):
                 st.session_state.messages.append({"role": "assistant", "content": f"No {resource_type.upper()} resources found to modify."})
                 flow["active"] = False
                 return
-            
+
             flow["resources"] = resources
             if len(resources) == 1:
                 flow["selected_resource"] = resources[0]
@@ -582,7 +897,14 @@ def handle_modify_resource_flow(user_message):
                 flow["awaiting_selection"] = True
         except Exception as e:
             st.session_state.messages.append({"role": "assistant", "content": f"Error listing {resource_type}s: {e}"})
-            diagnose_error(f"Error listing {resource_type}s", traceback.format_exc())
+            session_id = st.session_state.get('session_id', 'default_session')
+            diagnose_error(
+                f"Error listing {resource_type}s",
+                traceback.format_exc(),
+                f"list_{resource_type}",
+                {},
+                session_id
+            )
             flow["active"] = False
         return
 
@@ -674,11 +996,18 @@ def handle_list_resources(resource_type):
                         "details": resources[0]
                     }
             else:
-                st.session_state.messages.append({"role": "assistant", "content": f"No {resource_type.upper()} resources found."}) 
+                st.session_state.messages.append({"role": "assistant", "content": f"No {resource_type.upper()} resources found."})
                 st.session_state.active_context = None # Clear active context if no resources are found
         except Exception as e:
             st.session_state.messages.append({"role": "assistant", "content": f"Error listing {resource_type.upper()} resources: {e}"})
-            diagnose_error(f"Error listing {resource_type.upper()}: {e}", traceback.format_exc())
+            session_id = st.session_state.get('session_id', 'default_session')
+            diagnose_error(
+                f"Error listing {resource_type.upper()}: {e}",
+                traceback.format_exc(),
+                f"list_{resource_type}",
+                {},
+                session_id
+            )
     if "conversation_flow" in st.session_state:
         st.session_state.conversation_flow["active"] = False
 
@@ -686,22 +1015,41 @@ def handle_list_resources(resource_type):
 
 def handle_cost_estimation(user_message):
     st.session_state.messages.append({"role": "assistant", "content": "Okay, I can help you estimate the cost of your request."})
+    session_id = st.session_state.get('session_id', 'default_session')
     try:
-        prompt = f"Please estimate the monthly cost of the following AWS resource request: {user_message}. Provide a breakdown of the costs and any assumptions you made."
+        recent_history = get_recent_history(session_id, limit=3)
+        context_str = ""
+        if recent_history:
+            context_str = "Recent conversation context:\n" + "\n".join([f"- {msg.get('content', '')}" for msg in recent_history if msg.get('role') == 'user'])
+
+        prompt = f"""Please estimate the monthly cost of the following AWS resource request.
+        {context_str}
+        Request: {user_message}
+
+        Provide a detailed breakdown of the costs and any assumptions you made.
+        Include cost-saving recommendations if applicable."""
+
         cost_estimation, _ = send_to_perplexity(prompt)
         st.session_state.messages.append({"role": "assistant", "content": cost_estimation})
     except Exception as e:
         st.session_state.messages.append({"role": "assistant", "content": f"Error estimating cost: {e}"})
-        diagnose_error(f"Error estimating cost: {e}", traceback.format_exc())
+        diagnose_error(
+            f"Error estimating cost: {e}",
+            traceback.format_exc(),
+            "cost_estimation",
+            {},
+            session_id
+        )
 
 def handle_list_creatable_resources():
     st.session_state.messages.append({"role": "assistant", "content": "Here are the AWS resources you can create:"})
     resource_list_str = ""
     for resource_type in RESOURCE_PARAMS.keys():
-        resource_list_str += f"- {resource_type.replace("_", " ").title()}\n"
+        resource_list_str += f"- {resource_type.replace('_', ' ').title()}\n"
     st.session_state.messages.append({"role": "assistant", "content": resource_list_str})
     if "conversation_flow" in st.session_state:
         st.session_state.conversation_flow["active"] = False
+
 
 
 def handle_alias(user_message):
@@ -729,6 +1077,211 @@ def handle_history():
     for i, command in enumerate(st.session_state.history):
         history_str += f"{i+1}. {command}\n"
     st.session_state.messages.append({"role": "assistant", "content": history_str})
+
+def handle_enhanced_intent_recognition(user_message):
+    """
+    Enhanced intent recognition using AI-powered classification,
+    context awareness, and proactive suggestions.
+    """
+    if not user_message:
+        return
+
+    session_id = st.session_state.get('session_id', 'default_session')
+    user_id = st.session_state.get('user_id', 'default_user')
+
+    # Get conversation context and history
+    context = get_context(session_id, user_id)
+    recent_history = get_recent_history(session_id, limit=5)
+
+    # Use enhanced AI-powered intent classification
+    intent, confidence, extracted_params = classify_intent(user_message, recent_history)
+
+    # Update context with current intent and confidence
+    update_context(session_id, current_intent=intent, confidence_score=confidence)
+
+    # Handle different intent types
+    if intent == 'unknown':
+        # Provide suggestions for unclear intents
+        suggestions = get_intent_suggestions(user_message)
+        if suggestions:
+            suggestion_text = "I'm not sure what you meant. Did you want to:\n" + "\n".join([f"- {sug}" for sug in suggestions])
+            st.session_state.messages.append({"role": "assistant", "content": suggestion_text})
+        else:
+            # Fallback to general AI response
+            ai_response, err = send_to_perplexity(user_message)
+            if err:
+                st.session_state.messages.append({"role": "assistant", "content": f"AI communication failed: {err}"})
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": ai_response})
+
+    elif intent in ['create_ec2', 'create_s3', 'create_rds', 'create_dynamodb', 'create_iam_user', 'create_iam_role', 'create_iam_policy']:
+        resource_type = intent.replace('create_', '')
+        handle_enhanced_create_resource(user_message, resource_type, extracted_params, session_id, user_id)
+
+    elif intent in ['destroy_ec2', 'destroy_s3', 'destroy_rds', 'destroy_dynamodb', 'destroy_iam_user', 'destroy_iam_role', 'destroy_iam_policy']:
+        resource_type = intent.replace('destroy_', '')
+        handle_enhanced_destroy_resource(user_message, resource_type, session_id)
+
+    elif intent in ['list_ec2', 'list_s3', 'list_rds', 'list_dynamodb', 'list_iam_user', 'list_iam_role', 'list_iam_policy']:
+        resource_type = intent.replace('list_', '')
+        handle_list_resources(resource_type)
+
+    elif intent == 'cost_estimation':
+        handle_enhanced_cost_estimation(user_message, session_id)
+
+    elif intent == 'help':
+        handle_enhanced_help(session_id)
+
+    else:
+        # Handle other intents or fallback to AI
+        ai_response, err = send_to_perplexity(user_message)
+        if err:
+            st.session_state.messages.append({"role": "assistant", "content": f"AI communication failed: {err}"})
+        else:
+            st.session_state.messages.append({"role": "assistant", "content": ai_response})
+
+    # Add proactive suggestions if confidence is high enough
+    if confidence > 0.7 and intent.startswith(('create_', 'destroy_')):
+        suggestions = get_proactive_suggestions(intent, extracted_params or {}, user_id)
+        if suggestions:
+            suggestion_text = "\n💡 **Suggestions:**\n" + "\n".join([f"• {sug}" for sug in suggestions[:3]])
+            st.session_state.messages.append({"role": "assistant", "content": suggestion_text})
+
+def handle_enhanced_create_resource(user_message, resource_type, extracted_params, session_id, user_id):
+    """
+    Enhanced resource creation with smart parameter extraction and suggestions.
+    """
+    st.session_state.messages.append({"role": "assistant", "content": f"✅ I can help you create a {resource_type.upper()} resource."})
+
+    # Extract parameters using enhanced extractor
+    all_params = extract_parameters(user_message, resource_type, get_recent_history(session_id), user_id)
+
+    # Merge with any previously extracted parameters
+    if extracted_params:
+        all_params.update(extracted_params)
+
+    # Check for missing required parameters
+    missing_params = get_missing_parameters(all_params, resource_type)
+
+    if missing_params:
+        st.session_state.messages.append({"role": "assistant", "content": f"📝 I found some parameters from your message, but I need a few more details to create the {resource_type.upper()}.\n\n**Missing Parameters:** {', '.join([p.replace('_', ' ').title() for p in missing_params])}"})
+
+        # Find the index of the first missing parameter in the standard RESOURCE_PARAMS order
+        params_for_resource = RESOURCE_PARAMS.get(resource_type, [])
+        param_names = [p["name"] for p in params_for_resource]
+
+        # Find the first missing parameter that exists in the standard order
+        first_missing = None
+        current_param_index = 0
+        for i, param_name in enumerate(param_names):
+            if param_name in missing_params:
+                first_missing = param_name
+                current_param_index = i
+                break
+
+        if first_missing:
+            # Start conversation flow for missing parameters using standard flow
+            st.session_state.conversation_flow = {
+                "active": True,
+                "type": "create_resource",
+                "resource_type": resource_type,
+                "params": all_params,
+                "current_param_index": current_param_index,
+                "missing_params": missing_params,
+                "extracted_params": all_params,
+                "enhanced_flow": True  # Mark this as coming from enhanced flow
+            }
+
+            # Don't ask for the parameter here - let the standard flow handle it
+            # This prevents double-asking for the same parameter
+            handle_create_resource_flow(None)
+            return
+        else:
+            # Fallback if no missing parameters found in standard order
+            st.session_state.messages.append({"role": "assistant", "content": "❌ I couldn't determine which parameter to ask for next. Please try using the standard creation flow."})
+    else:
+        # All parameters available, proceed with preview
+        st.session_state.messages.append({"role": "assistant", "content": f"✅ Great! I have all the required parameters for creating the {resource_type.upper()}."})
+
+        st.session_state.conversation_flow = {
+            "active": True,
+            "type": "create_resource",
+            "resource_type": resource_type,
+            "params": all_params,
+            "current_param_index": len(RESOURCE_PARAMS.get(resource_type, [])),
+            "ready_to_execute": True
+        }
+        handle_create_resource_flow(None)
+
+def handle_enhanced_destroy_resource(user_message, resource_type, session_id):
+    """
+    Enhanced resource destruction with context awareness.
+    Always shows the list of resources first for user selection.
+    """
+    st.session_state.messages.append({"role": "assistant", "content": f"Okay, I can help you destroy a {resource_type.upper()} resource."})
+
+    # Always list resources for selection first, regardless of active context
+    # This gives users full visibility and control over which resource to destroy
+    st.session_state.conversation_flow = {
+        "active": True,
+        "type": "destroy_resource",
+        "resource_type": resource_type,
+    }
+    handle_destroy_resource_flow(None)
+
+def handle_enhanced_cost_estimation(user_message, session_id):
+    """
+    Enhanced cost estimation with context awareness.
+    """
+    st.session_state.messages.append({"role": "assistant", "content": "Okay, I can help you estimate the cost of your request."})
+
+    # Get recent context to provide more accurate estimates
+    recent_history = get_recent_history(session_id, limit=3)
+    context_str = ""
+    if recent_history:
+        context_str = "Recent conversation context:\n" + "\n".join([f"- {msg.get('content', '')}" for msg in recent_history if msg.get('role') == 'user'])
+
+    try:
+        prompt = f"""Please estimate the monthly cost of the following AWS resource request.
+        {context_str}
+        Request: {user_message}
+
+        Provide a detailed breakdown of the costs and any assumptions you made.
+        Include cost-saving recommendations if applicable."""
+
+        cost_estimation, _ = send_to_perplexity(prompt)
+        st.session_state.messages.append({"role": "assistant", "content": cost_estimation})
+    except Exception as e:
+        st.session_state.messages.append({"role": "assistant", "content": f"Error estimating cost: {e}"})
+        diagnose_error(f"Error estimating cost: {e}", traceback.format_exc())
+
+def handle_enhanced_help(session_id):
+    """
+    Enhanced help with contextual suggestions.
+    """
+    context = get_context(session_id)
+    current_state = context.conversation_state if hasattr(context, 'conversation_state') else 'idle'
+    current_intent = context.current_intent if hasattr(context, 'current_intent') else ''
+
+    help_messages = get_contextual_help(current_state, current_intent)
+
+    help_text = "**Help & Guidance:**\n" + "\n".join([f"• {msg}" for msg in help_messages])
+
+    # Add general help
+    general_help = """
+**Available Commands:**
+• Create resources: "create an EC2 instance", "create an S3 bucket", etc.
+• List resources: "list EC2 instances", "list S3 buckets", etc.
+• Destroy resources: "destroy EC2 instance", "destroy S3 bucket", etc.
+• Cost estimation: "what's the cost of..."
+• Help: "help" or "what can you do"
+
+**Tips:**
+• You can specify multiple parameters in one message
+• Use natural language like "powerful instance" or "small database"
+• Type 'history' to see your command history"""
+
+    st.session_state.messages.append({"role": "assistant", "content": help_text + general_help})
 
 def handle_intent_recognition(user_message):
 

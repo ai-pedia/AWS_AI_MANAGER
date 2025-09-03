@@ -34,6 +34,7 @@ def save_session_state():
 from services.terraform_service import create_ec2, destroy_ec2, list_ec2
 from utils.conversation_handler import execute_user_action # New import
 from utils.ai_client import send_to_perplexity # New import
+from utils.aws_environment import generate_dynamic_welcome_message # Dynamic welcome message
 
 st.set_page_config(page_title="AWS AI Manager", layout="wide")
 
@@ -51,19 +52,8 @@ if "aliases" not in st.session_state:
 
 # Display welcome message if chat history is empty
 if not st.session_state.messages:
-    st.session_state.messages.append({"role": "assistant", "content": """
-Hello! I'm your AWS AI Manager. I can help you manage your AWS resources using natural language.
-
-Here are some examples of what you can ask me:
-
-*   `Create an EC2 instance`
-*   `Destroy my S3 bucket named my-test-bucket`
-*   `List all running EC2 instances`
-*   `Estimate the cost of a t3.micro EC2 instance with 50GB storage`
-*   `Modify EC2 instance i-0abcdef1234567890 root volume size to 100GB`
-
-How can I help you with AWS today?
-"""})
+    welcome_message = generate_dynamic_welcome_message()
+    st.session_state.messages.append({"role": "assistant", "content": welcome_message})
 
 # Display chat messages from history on app rerun
 for message in st.session_state.messages:

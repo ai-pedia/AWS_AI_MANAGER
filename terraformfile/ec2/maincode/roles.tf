@@ -10,7 +10,7 @@ data "aws_iam_policy_document" "instance-assume-role-policy" {
 
 resource "aws_iam_role" "iam_role" {
   assume_role_policy = coalesce(var.assume_role_policy, data.aws_iam_policy_document.instance-assume-role-policy.json)
-  name               = "travrol-${var.ec2_name}"
+  name               = "rol-${var.ec2_name}"
   description        = "ec2 instance profile"
   force_detach_policies = var.force_detach_polices
 }

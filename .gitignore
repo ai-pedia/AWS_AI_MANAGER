@@ -1,28 +1,181 @@
-# Python
+# Byte-compiled / optimized / DLL files
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
 .Python
-venc/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+pipenv.lock
+
+# pytest
+.cache
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# VSCode settings
+.vscode/
+
+# Environment variables
 .env
 
-# Terraform
-.terraform/
+# Virtual environments
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Terraform state files and directories
 *.tfstate
-*.tfstate.*
+*.tfstate.backup
+.terraform/
+terraform.tfvars
 .terraform.lock.hcl
+
+# Terraform variable files for instances (exclude all .tfvars files)
 *.tfvars
 
-# Streamlit
+# Ignore session state file
 session_state.json
 
+# Ignore generated presentation
+AWS_AI_Manager_Presentation.pptx
+
+# Ignore Python bytecode cache
+__pycache__/
+
+# Ignore test reports
+test-reports/
+
+# Ignore logs
+*.log
+
+# Ignore coverage reports
+.coverage
+
+# Ignore temporary files
+*.tmp
+*.temp
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
 # IDEs
-.vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
 
-# Operating System
-.DS_Store
-Thumbs.db
+# AWS credentials (if any are accidentally committed)
+.aws/
+credentials
+config
+
+# Local development files
+local_settings.py
+development.py
+
+# Documentation files (except README.md)
+*.md
+!README.md
+
+# Conversation context and user profiles
+conversation_context.json
+user_profiles.json
+
+# Generated presentation
+AWS_AI_Manager_Presentation.pptx
+
+# Presentation generation script
+generate_ppt.py

@@ -91,15 +91,15 @@ def _validate_volume_type(volume_type: str) -> bool:
     valid_volume_types = ["gp2", "gp3", "io1", "io2", "st1", "sc1", "standard"]
     return volume_type in valid_volume_types
 
-def create_ec2(ec2_name: str, ec2_type: str, vol1_root_size: int, vol1_volume_type: str, ec2_ebs2_data_size: int, ec2_ami: str, ec2_availabilityzone: str):
+def create_ec2(ec2_name: str, ec2_type: str, vol1_root_size, vol1_volume_type: str, ec2_ebs2_data_size, ec2_ami: str, ec2_availabilityzone: str):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2'))
     template_dir = os.path.join(base_dir, 'maincode')
     instance_dir = os.path.join(base_dir, ec2_name)
-    
+
     # Create a new directory for the instance
     if not os.path.exists(instance_dir):
         os.makedirs(instance_dir)
-    
+
     # Copy template files to the new instance directory
     for item in os.listdir(template_dir):
         s = os.path.join(template_dir, item)
@@ -109,13 +109,29 @@ def create_ec2(ec2_name: str, ec2_type: str, vol1_root_size: int, vol1_volume_ty
         else:
             shutil.copy2(s, d)
 
+    # Clean and validate parameters
+    def clean_size_value(value):
+        """Clean size values by removing units and converting to string"""
+        if isinstance(value, str):
+            # Remove units like 'gb', 'GB', etc.
+            value = re.sub(r'\s*(gb|gigabytes?|mb|megabytes?|tb|terabytes?)\s*$', '', value, flags=re.IGNORECASE)
+            # Extract numeric part
+            match = re.search(r'(\d+)', value)
+            if match:
+                return match.group(1)
+        return str(value).strip()
+
+    # Clean the size parameters
+    vol1_root_size_clean = clean_size_value(vol1_root_size)
+    ec2_ebs2_data_size_clean = clean_size_value(ec2_ebs2_data_size)
+
     tfvars_path = os.path.join(instance_dir, f'terraform_ec2_{ec2_name}.tfvars')
     with open(tfvars_path,'w') as f:
         f.write(f'ec2_name = "{ec2_name}"\n')
         f.write(f'ec2_type = "{ec2_type}"\n')
-        f.write(f'vol1_root_size = {vol1_root_size}\n')
+        f.write(f'vol1_root_size = "{vol1_root_size_clean}"\n')
         f.write(f'vol1_volume_type = "{vol1_volume_type}"\n')
-        f.write(f'ec2_ebs2_data_size = {ec2_ebs2_data_size}\n')
+        f.write(f'ec2_ebs2_data_size = "{ec2_ebs2_data_size_clean}"\n')
         f.write(f'ec2_ami = "{ec2_ami}"\n')
         f.write(f'ec2_availabilityzone = "{ec2_availabilityzone}"\n')
         
@@ -138,7 +154,7 @@ def create_ec2(ec2_name: str, ec2_type: str, vol1_root_size: int, vol1_volume_ty
     }
 
 
-def update_ec2_volume_size(instance_id: str, new_volume_size: int):
+def update_ec2_volume_size(instance_id: str, new_volume_size):
     details = get_ec2_details(instance_id)
     ec2_name = details['ec2_name']
     instance_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'ec2', ec2_name))
@@ -147,25 +163,39 @@ def update_ec2_volume_size(instance_id: str, new_volume_size: int):
     if not os.path.exists(instance_dir):
         raise Exception(f"Cannot update instance '{ec2_name}'. Directory not found.")
 
+    # Clean the new volume size parameter
+    def clean_size_value(value):
+        """Clean size values by removing units and converting to string"""
+        if isinstance(value, str):
+            # Remove units like 'gb', 'GB', etc.
+            value = re.sub(r'\s*(gb|gigabytes?|mb|megabytes?|tb|terabytes?)\s*$', '', value, flags=re.IGNORECASE)
+            # Extract numeric part
+            match = re.search(r'(\d+)', value)
+            if match:
+                return match.group(1)
+        return str(value).strip()
+
+    new_volume_size_clean = clean_size_value(new_volume_size)
+
     # Update the volume size in the tfvars file
     with open(tfvars_path, 'w') as f:
         f.write(f'ec2_name = "{details['ec2_name']}"\n')
-        f.write(f'vol1_root_size = {new_volume_size}\n') # Updated size
+        f.write(f'vol1_root_size = "{new_volume_size_clean}"\n') # Updated size
         f.write(f'vol1_volume_type = "{details['vol1_volume_type']}"\n')
-        f.write(f'ec2_ebs2_data_size = {details['ec2_ebs2_data_size']}\n')
+        f.write(f'ec2_ebs2_data_size = "{details['ec2_ebs2_data_size']}"\n')
         f.write(f'ec2_ami = "{details['ec2_ami']}"\n')
         f.write(f'ec2_availabilityzone = "{details['ec2_availabilityzone']}"\n')
-    
+
     return _run_terraform_apply(instance_dir, tfvars_path)
 
 def create_s3_bucket(bucket_name: str):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 's3'))
     template_dir = os.path.join(base_dir, 'maincode')
     instance_dir = os.path.join(base_dir, bucket_name)
-    
+
     if not os.path.exists(instance_dir):
         os.makedirs(instance_dir)
-    
+
     for item in os.listdir(template_dir):
         s = os.path.join(template_dir, item)
         d = os.path.join(instance_dir, item)
@@ -177,22 +207,22 @@ def create_s3_bucket(bucket_name: str):
     tfvars_path = os.path.join(instance_dir, f'terraform_s3_{bucket_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'bucket_name = "{bucket_name}"\n')
-    
+
     tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
 
     # Standardize the output to match the list_s3_buckets function
     return {
-        'Name': tf_outputs.get('bucket_name', bucket_name) # Use output if available, else fallback to input
+        'Name': tf_outputs.get('bucket_name', bucket_name)  # Use output if available, else fallback to input
     }
 
-def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_instance_class: str, allocated_storage: int, db_username: str, db_password: str, db_publicly_accessible: str):
+def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_instance_class: str, allocated_storage, db_username: str, db_password: str, db_publicly_accessible: str):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'rds'))
     template_dir = os.path.join(base_dir, 'maincode')
     instance_dir = os.path.join(base_dir, db_identifier)
-    
+
     if not os.path.exists(instance_dir):
         os.makedirs(instance_dir)
-    
+
     for item in os.listdir(template_dir):
         s = os.path.join(template_dir, item)
         d = os.path.join(instance_dir, item)
@@ -201,13 +231,27 @@ def create_rds(db_identifier: str, db_engine: str, db_engine_version: str, db_in
         else:
             shutil.copy2(s, d)
 
+    # Clean the allocated storage parameter
+    def clean_size_value(value):
+        """Clean size values by removing units and converting to string"""
+        if isinstance(value, str):
+            # Remove units like 'gb', 'GB', etc.
+            value = re.sub(r'\s*(gb|gigabytes?|mb|megabytes?|tb|terabytes?)\s*$', '', value, flags=re.IGNORECASE)
+            # Extract numeric part
+            match = re.search(r'(\d+)', value)
+            if match:
+                return match.group(1)
+        return str(value).strip()
+
+    allocated_storage_clean = clean_size_value(allocated_storage)
+
     tfvars_path = os.path.join(instance_dir, f'terraform_rds_{db_identifier}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'db_identifier = "{db_identifier}"\n')
         f.write(f'db_engine = "{db_engine}"\n')
         f.write(f'db_engine_version = "{db_engine_version}"\n')
         f.write(f'db_instance_class = "{db_instance_class}"\n')
-        f.write(f'allocated_storage = {allocated_storage}\n')
+        f.write(f'allocated_storage = "{allocated_storage_clean}"\n')
         f.write(f'db_username = "{db_username}"\n')
         f.write(f'db_password = "{db_password}"\n')
         f.write(f'db_publicly_accessible = {str(db_publicly_accessible.lower() == "yes").lower()}\n')
@@ -228,10 +272,10 @@ def create_dynamodb(table_name: str, hash_key_name: str, hash_key_type: str):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'dynamodb'))
     template_dir = os.path.join(base_dir, 'maincode')
     instance_dir = os.path.join(base_dir, table_name)
-    
+
     if not os.path.exists(instance_dir):
         os.makedirs(instance_dir)
-    
+
     for item in os.listdir(template_dir):
         s = os.path.join(template_dir, item)
         d = os.path.join(instance_dir, item)
@@ -249,17 +293,17 @@ def create_dynamodb(table_name: str, hash_key_name: str, hash_key_type: str):
 
     # Standardize the output to match the list_dynamodb_tables function
     return {
-        'TableName': tf_outputs.get('dynamodb_table_name', table_name) # Use output if available, else fallback to input
+        'TableName': tf_outputs.get('dynamodb_table_name', table_name)  # Use output if available, else fallback to input
     }
 
 def create_iam_user(user_name: str):
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'terraformfile', 'iam'))
     template_dir = os.path.join(base_dir, 'maincode')
     instance_dir = os.path.join(base_dir, f"user_{user_name}")
-    
+
     if not os.path.exists(instance_dir):
         os.makedirs(instance_dir)
-    
+
     for item in os.listdir(template_dir):
         s = os.path.join(template_dir, item)
         d = os.path.join(instance_dir, item)
@@ -271,12 +315,12 @@ def create_iam_user(user_name: str):
     tfvars_path = os.path.join(instance_dir, f'terraform_iam_user_{user_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'iam_user_name = "{user_name}"\n')
-    
+
     tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
 
     # Standardize the output to match the list_iam_users function
     result = {
-        'UserName': tf_outputs.get('iam_user_name', user_name) # Use output if available, else fallback to input
+        'UserName': tf_outputs.get('iam_user_name', user_name)  # Use output if available, else fallback to input
     }
     return result
 
@@ -295,16 +339,16 @@ def create_iam_role(role_name: str):
             shutil.copytree(s, d, symlinks=True, ignore=None)
         else:
             shutil.copy2(s, d)
-            
+
     tfvars_path = os.path.join(instance_dir, f'terraform_iam_role_{role_name}.tfvars')
     with open(tfvars_path, 'w') as f:
         f.write(f'iam_role_name = "{role_name}"\n')
-    
+
     tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
 
     # Standardize the output to match the list_iam_roles function
     return {
-        'RoleName': tf_outputs.get('iam_role_name', role_name) # Use output if available, else fallback to input
+        'RoleName': tf_outputs.get('iam_role_name', role_name)  # Use output if available, else fallback to input
     }
 
 def create_iam_policy(policy_name: str, policy_description: str, policy_document: str):
@@ -330,7 +374,7 @@ def create_iam_policy(policy_name: str, policy_description: str, policy_document
         f.write(f'iam_policy_document = <<-EOT\n')
         f.write(f'{policy_document}\n')
         f.write(f'EOT\n')
-    
+
     tf_outputs = _run_terraform_apply(instance_dir, tfvars_path)
 
     # Standardize the output to match the list_iam_policies function
