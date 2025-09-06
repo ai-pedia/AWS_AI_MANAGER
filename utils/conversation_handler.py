@@ -502,6 +502,266 @@ def _show_resource_preview(flow):
     st.session_state.messages.append({"role": "assistant", "content": preview_text})
     flow["awaiting_confirmation"] = True
 
+def _show_modify_preview(flow):
+    """Show a preview of the resource modification before execution"""
+    resource_type = flow["resource_type"]
+    params = flow.get("params", {})
+    selected_resource = flow["selected_resource"]
+
+    # Create a human-readable preview
+    resource_name = selected_resource.get(RESOURCE_IDENTIFIERS[resource_type], 'Unknown')
+    preview_text = f"## 🔧 **Modify {resource_type.upper()} Resource: {resource_name}**\n\n"
+
+    # Map parameter names to human-readable labels for all resource types
+    param_labels = {
+        # EC2 parameters
+        'ec2_name': 'Instance Name',
+        'ec2_ami': 'AMI ID',
+        'ec2_type': 'Instance Type',
+        'ec2_availabilityzone': 'Availability Zone',
+        'vol1_root_size': 'Root Volume Size (GB)',
+        'vol1_volume_type': 'Root Volume Type',
+        'ec2_ebs2_data_size': 'Data Volume Size (GB)',
+
+        # S3 parameters
+        'bucket_name': 'Bucket Name',
+
+        # RDS parameters
+        'db_identifier': 'Database Identifier',
+        'db_engine': 'Database Engine',
+        'db_engine_version': 'Engine Version',
+        'db_instance_class': 'Instance Class',
+        'allocated_storage': 'Storage (GB)',
+        'db_username': 'Username',
+        'db_password': 'Password',
+        'db_publicly_accessible': 'Publicly Accessible',
+
+        # DynamoDB parameters
+        'table_name': 'Table Name',
+        'hash_key_name': 'Hash Key Name',
+        'hash_key_type': 'Hash Key Type'
+    }
+
+    preview_text += "**Proposed Changes:**\n"
+    for param_key, param_value in params.items():
+        label = param_labels.get(param_key, param_key.replace('_', ' ').title())
+
+        # Mask sensitive information
+        if 'password' in param_key.lower():
+            display_value = "••••••••"
+        else:
+            display_value = param_value
+
+        preview_text += f"- **{label}:** {display_value}\n"
+
+    # Resource-specific warnings and notes
+    preview_text += "\n**⚠️ Important Notes:**\n"
+
+    if resource_type == 'ec2':
+        preview_text += "- 🔄 **EC2 modifications may require instance restart**\n"
+        preview_text += "- 💰 **Additional charges may apply for larger volumes**\n"
+        preview_text += "- ⏱️ **Volume modifications may take time to complete**\n"
+
+    elif resource_type == 'rds':
+        preview_text += "- 🔄 **RDS modifications may cause downtime**\n"
+        preview_text += "- 💰 **Storage increases will incur additional charges**\n"
+        preview_text += "- ⏱️ **Some changes require instance restart**\n"
+
+    elif resource_type == 's3':
+        preview_text += "- ⚠️ **Bucket name changes are not supported**\n"
+        preview_text += "- 🔒 **Ensure proper permissions for modifications**\n"
+
+    elif resource_type == 'dynamodb':
+        preview_text += "- 🔄 **Table modifications may affect performance**\n"
+        preview_text += "- 💰 **Throughput changes will affect billing**\n"
+
+    preview_text += "\n**🚀 Ready to apply these modifications?**\n"
+    preview_text += "**Type 'yes' to proceed, 'modify' to change parameters, or 'cancel' to abort.**"
+
+    st.session_state.messages.append({"role": "assistant", "content": preview_text})
+    flow["awaiting_confirmation"] = True
+
+def _extract_current_resource_params(resource, resource_type):
+    """Extract current parameter values from a resource for modification preview"""
+    params = {}
+
+    # Map resource attributes to parameter names based on resource type
+    if resource_type == 'ec2':
+        # Extract EC2-specific parameters
+        if 'InstanceId' in resource:
+            params['instance_id'] = resource['InstanceId']
+        if 'InstanceType' in resource:
+            params['ec2_type'] = resource['InstanceType']
+        if 'ImageId' in resource:
+            params['ec2_ami'] = resource['ImageId']
+        if 'Placement' in resource and 'AvailabilityZone' in resource['Placement']:
+            params['ec2_availabilityzone'] = resource['Placement']['AvailabilityZone']
+
+        # Extract volume information
+        if 'BlockDeviceMappings' in resource:
+            for mapping in resource['BlockDeviceMappings']:
+                if mapping.get('DeviceName') == '/dev/sda1' or mapping.get('DeviceName') == '/dev/xvda':
+                    if 'Ebs' in mapping:
+                        ebs = mapping['Ebs']
+                        if 'Size' in ebs:
+                            params['vol1_root_size'] = str(ebs['Size'])
+                        if 'VolumeType' in ebs:
+                            params['vol1_volume_type'] = ebs['VolumeType']
+
+    elif resource_type == 'rds':
+        # Extract RDS-specific parameters
+        if 'DBInstanceIdentifier' in resource:
+            params['db_identifier'] = resource['DBInstanceIdentifier']
+        if 'Engine' in resource:
+            params['db_engine'] = resource['Engine']
+        if 'EngineVersion' in resource:
+            params['db_engine_version'] = resource['EngineVersion']
+        if 'DBInstanceClass' in resource:
+            params['db_instance_class'] = resource['DBInstanceClass']
+        if 'AllocatedStorage' in resource:
+            params['allocated_storage'] = str(resource['AllocatedStorage'])
+        if 'MasterUsername' in resource:
+            params['db_username'] = resource['MasterUsername']
+        if 'PubliclyAccessible' in resource:
+            params['db_publicly_accessible'] = 'yes' if resource['PubliclyAccessible'] else 'no'
+
+    elif resource_type == 's3':
+        # Extract S3-specific parameters
+        if 'Name' in resource:
+            params['bucket_name'] = resource['Name']
+
+    elif resource_type == 'dynamodb':
+        # Extract DynamoDB-specific parameters
+        if 'TableName' in resource:
+            params['table_name'] = resource['TableName']
+        if 'KeySchema' in resource:
+            for key in resource['KeySchema']:
+                if key.get('KeyType') == 'HASH':
+                    if 'AttributeName' in key:
+                        params['hash_key_name'] = key['AttributeName']
+                    # Find the attribute type
+                    if 'AttributeDefinitions' in resource:
+                        for attr in resource['AttributeDefinitions']:
+                            if attr.get('AttributeName') == key.get('AttributeName'):
+                                params['hash_key_type'] = attr.get('AttributeType', 'S')
+                                break
+
+    elif resource_type == 'iam_user':
+        # Extract IAM User-specific parameters
+        if 'UserName' in resource:
+            params['user_name'] = resource['UserName']
+        if 'UserId' in resource:
+            params['user_id'] = resource['UserId']
+        if 'CreateDate' in resource:
+            params['create_date'] = str(resource['CreateDate'])
+
+    elif resource_type == 'iam_role':
+        # Extract IAM Role-specific parameters
+        if 'RoleName' in resource:
+            params['role_name'] = resource['RoleName']
+        if 'RoleId' in resource:
+            params['role_id'] = resource['RoleId']
+        if 'CreateDate' in resource:
+            params['create_date'] = str(resource['CreateDate'])
+
+    elif resource_type == 'iam_policy':
+        # Extract IAM Policy-specific parameters
+        if 'PolicyName' in resource:
+            params['policy_name'] = resource['PolicyName']
+        if 'PolicyId' in resource:
+            params['policy_id'] = resource['PolicyId']
+        if 'Description' in resource:
+            params['policy_description'] = resource['Description']
+        if 'CreateDate' in resource:
+            params['create_date'] = str(resource['CreateDate'])
+
+    return params
+
+def _execute_modify_resource(flow):
+    """Execute the resource modification"""
+    resource_type = flow["resource_type"]
+    selected_resource = flow["selected_resource"]
+    params = flow.get("params", {})
+
+    # Get the resource identifier for modification
+    resource_id = selected_resource[RESOURCE_DESTROY_IDS[resource_type]]
+
+    with st.spinner(f"Modifying {resource_type.upper()} {resource_id}..."):
+        try:
+            # Call the appropriate modification function based on resource type and parameters
+            if resource_type == "ec2":
+                # Handle EC2 modifications
+                if 'vol1_root_size' in params:
+                    response = terraform_service.update_ec2_volume_size(resource_id, int(params['vol1_root_size']))
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **EC2 instance modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Root Volume Size\n**New Value:** {params['vol1_root_size']} GB\n\n{response}"})
+                elif 'ec2_type' in params:
+                    response = terraform_service.update_ec2_instance_type(resource_id, params['ec2_type'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **EC2 instance modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Instance Type\n**New Value:** {params['ec2_type']}\n\n{response}"})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification of the specified parameter is not yet supported for EC2 instances."})
+
+            elif resource_type == "rds":
+                # Handle RDS modifications
+                if 'allocated_storage' in params:
+                    response = terraform_service.update_rds_storage(resource_id, int(params['allocated_storage']))
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **RDS instance modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Allocated Storage\n**New Value:** {params['allocated_storage']} GB\n\n{response}"})
+                elif 'db_instance_class' in params:
+                    response = terraform_service.update_rds_instance_class(resource_id, params['db_instance_class'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **RDS instance modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Instance Class\n**New Value:** {params['db_instance_class']}\n\n{response}"})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification of the specified parameter is not yet supported for RDS instances."})
+
+            elif resource_type == "iam_user":
+                # Handle IAM User modifications
+                if 'user_name' in params:
+                    response = terraform_service.update_iam_user_name(resource_id, params['user_name'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **IAM User modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** User Name\n**New Value:** {params['user_name']}\n\n{response}"})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification of the specified parameter is not yet supported for IAM Users."})
+
+            elif resource_type == "iam_role":
+                # Handle IAM Role modifications
+                if 'role_name' in params:
+                    response = terraform_service.update_iam_role_name(resource_id, params['role_name'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **IAM Role modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Role Name\n**New Value:** {params['role_name']}\n\n{response}"})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification of the specified parameter is not yet supported for IAM Roles."})
+
+            elif resource_type == "iam_policy":
+                # Handle IAM Policy modifications
+                if 'policy_name' in params:
+                    response = terraform_service.update_iam_policy_name(resource_id, params['policy_name'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **IAM Policy modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Policy Name\n**New Value:** {params['policy_name']}\n\n{response}"})
+                elif 'policy_description' in params:
+                    response = terraform_service.update_iam_policy_description(resource_id, params['policy_description'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **IAM Policy modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Policy Description\n**New Value:** {params['policy_description']}\n\n{response}"})
+                elif 'policy_document' in params:
+                    response = terraform_service.update_iam_policy_document(resource_id, params['policy_document'])
+                    st.session_state.messages.append({"role": "assistant", "content": f"✅ **IAM Policy modified successfully!**\n\n**Resource:** {resource_id}\n**Parameter Updated:** Policy Document\n**New Value:** [JSON Document]\n\n{response}"})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification of the specified parameter is not yet supported for IAM Policies."})
+
+            else:
+                # For other resource types, show a generic message
+                st.session_state.messages.append({"role": "assistant", "content": f"❌ Modification is not yet supported for {resource_type.upper()} resources."})
+
+            # Update context with modification information
+            session_id = st.session_state.get('session_id', 'default_session')
+            update_context(session_id, last_action=f"modified_{resource_type}", modified_resource_id=resource_id)
+
+        except Exception as e:
+            st.session_state.messages.append({"role": "assistant", "content": f"❌ Error modifying {resource_type.upper()}: {e}"})
+            session_id = st.session_state.get('session_id', 'default_session')
+            diagnose_error(
+                f"Error modifying {resource_type.upper()}",
+                traceback.format_exc(),
+                f"modify_{resource_type}",
+                params,
+                session_id
+            )
+        finally:
+            flow["active"] = False
+
 def _execute_create_resource(flow):
     resource_type = flow["resource_type"]
 
@@ -873,6 +1133,60 @@ def handle_modify_resource_flow(user_message):
     flow = st.session_state.conversation_flow
     resource_type = flow["resource_type"]
 
+    # Handle confirmation step (same as create flow)
+    if flow.get("awaiting_confirmation"):
+        if user_message.lower() in ['yes', 'y', 'confirm', 'proceed']:
+            flow["awaiting_confirmation"] = False
+            flow["confirmed"] = True
+            _execute_modify_resource(flow)
+        elif user_message.lower() in ['modify', 'change', 'edit']:
+            flow["awaiting_confirmation"] = False
+            flow["awaiting_param_modification_decision"] = True
+            st.session_state.messages.append({"role": "assistant", "content": "🔧 **Parameter Modification**\n\nWhich parameter would you like to change? You can specify:\n- Parameter name (e.g., 'instance type', 'volume size')\n- Or type 'list' to see all current parameters"})
+        elif user_message.lower() in ['cancel', 'abort', 'no', 'n']:
+            flow["active"] = False
+            st.session_state.messages.append({"role": "assistant", "content": "❌ Resource modification cancelled."})
+        else:
+            st.session_state.messages.append({"role": "assistant", "content": "Please respond with:\n- **'yes'** to proceed with modification\n- **'modify'** to change parameters\n- **'cancel'** to abort"})
+        return
+
+    # Handle parameter modification (same as create flow)
+    if flow.get("awaiting_param_modification_decision"):
+        if user_message.lower() in ['list', 'show', 'current']:
+            # Show current parameters
+            current_params = flow.get("params", {})
+            if current_params:
+                current_params_str = "\n".join([f"- **{k.replace('_', ' ').title()}:** {v}" for k, v in current_params.items()])
+                st.session_state.messages.append({"role": "assistant", "content": f"📋 **Current Parameters:**\n{current_params_str}\n\nWhich parameter would you like to change?"})
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": "No parameters set yet. Which parameter would you like to modify?"})
+            return
+        elif user_message.lower() in ['done', 'finished', 'proceed']:
+            flow["awaiting_param_modification_decision"] = False
+            _show_modify_preview(flow)  # Show preview again
+            return
+        else:
+            # Try to match parameter
+            param_to_modify = _find_parameter_by_input(user_message, resource_type, flow.get("params", {}))
+            if param_to_modify:
+                flow["param_to_modify"] = param_to_modify
+                flow["awaiting_param_modification_decision"] = False
+                flow["awaiting_new_param_value"] = True
+                current_value = flow.get("params", {}).get(param_to_modify, "Not set")
+                st.session_state.messages.append({"role": "assistant", "content": f"Current value for **{param_to_modify.replace('_', ' ').title()}**: {current_value}\n\nWhat is the new value?"})
+            else:
+                st.session_state.messages.append({"role": "assistant", "content": "❌ Parameter not found. Please specify a valid parameter name or type 'list' to see all parameters."})
+            return
+
+    if flow.get("awaiting_new_param_value"):
+        param_to_modify = flow["param_to_modify"]
+        flow["params"][param_to_modify] = user_message.strip()
+        flow["awaiting_new_param_value"] = False
+        flow["param_to_modify"] = None
+        st.session_state.messages.append({"role": "assistant", "content": f"✅ Parameter updated! **{param_to_modify.replace('_', ' ').title()}** is now: {user_message.strip()}\n\nWould you like to modify another parameter? (yes/no)"})
+        flow["awaiting_param_modification_decision"] = True
+        return
+
     # Stage 1: List resources if not already listed
     if "resources" not in flow:
         try:
@@ -887,8 +1201,10 @@ def handle_modify_resource_flow(user_message):
             if len(resources) == 1:
                 flow["selected_resource"] = resources[0]
                 flow["resource_selected"] = True
-                st.session_state.messages.append({"role": "assistant", "content": f"You have one {resource_type.upper()}: {resources[0][RESOURCE_IDENTIFIERS[resource_type]]}. Which parameter would you like to modify? (e.g., vol1_root_size)"})
-                flow["awaiting_param_selection"] = True
+                # Initialize params with current resource values for preview
+                flow["params"] = _extract_current_resource_params(resources[0], resource_type)
+                _show_modify_preview(flow)
+                flow["awaiting_confirmation"] = True
             else:
                 resource_list_str = f"Please select a {resource_type.upper()} to modify by number:\n"
                 for i, resource in enumerate(resources):
@@ -911,47 +1227,22 @@ def handle_modify_resource_flow(user_message):
     # Stage 2: Handle user selection if multiple resources
     if flow.get("awaiting_selection"):
         selected_resource = _find_resource_by_identifier(user_message, flow["resources"], resource_type)
-        
+
         if selected_resource:
             flow["selected_resource"] = selected_resource
             flow["resource_selected"] = True
             flow["awaiting_selection"] = False
-            st.session_state.messages.append({"role": "assistant", "content": f"You have selected to modify: {flow['selected_resource'][RESOURCE_IDENTIFIERS[resource_type]]}. Which parameter would you like to modify? (e.g., vol1_root_size)"})
-            flow["awaiting_param_selection"] = True
+            # Initialize params with current resource values for preview
+            flow["params"] = _extract_current_resource_params(selected_resource, resource_type)
+            _show_modify_preview(flow)
+            flow["awaiting_confirmation"] = True
         else:
             st.session_state.messages.append({"role": "assistant", "content": "Invalid selection. Please choose a number from the list, or provide the resource name or ID."})
         return
 
-    # Stage 3: Handle parameter selection
-    if flow.get("awaiting_param_selection"):
-        param_name = user_message.strip()
-        # Basic validation: check if the parameter is in the EC2 creation params
-        valid_params = [p["name"] for p in RESOURCE_PARAMS.get(resource_type, [])]
-        if param_name in valid_params:
-            flow["param_to_modify"] = param_name
-            flow["awaiting_param_selection"] = False
-            st.session_state.messages.append({"role": "assistant", "content": f"What is the new value for {param_name}?"})
-            flow["awaiting_new_value"] = True
-        else:
-            st.session_state.messages.append({"role": "assistant", "content": f"Invalid parameter '{param_name}'. Please choose a parameter from the EC2 creation parameters (e.g., vol1_root_size)."})
-        return
-
-    # Stage 4: Handle new value input and execute modification
-    if flow.get("awaiting_new_value"):
-        new_value = user_message.strip()
-        instance_id = flow["selected_resource"][RESOURCE_DESTROY_IDS[resource_type]] # InstanceId is used for destroy, but also unique identifier
-        param_to_modify = flow["param_to_modify"]
-
-        with st.spinner(f"Modifying {resource_type.upper()} {instance_id}..." ):
-            try:
-                # Call the new update function in terraform_service
-                response = terraform_service.update_ec2_volume_size(instance_id, int(new_value)) # Assuming vol1_root_size is int
-                st.session_state.messages.append({"role": "assistant", "content": f"{resource_type.upper()} modified successfully!\n{response}"})
-            except Exception as e:
-                st.session_state.messages.append({"role": "assistant", "content": f"Error modifying {resource_type.upper()}: {e}"})
-                diagnose_error(f"Error modifying {resource_type.upper()}", traceback.format_exc())
-            finally:
-                flow["active"] = False
+    # If we get here, something went wrong
+    st.session_state.messages.append({"role": "assistant", "content": "❌ Unexpected state in modify flow. Please try again."})
+    flow["active"] = False
 
 def handle_list_all_resources():
     st.session_state.messages.append({"role": "assistant", "content": "Okay, I will list all of your AWS resources."})
@@ -1126,6 +1417,10 @@ def handle_enhanced_intent_recognition(user_message):
         resource_type = intent.replace('list_', '')
         handle_list_resources(resource_type)
 
+    elif intent in ['modify_ec2']:
+        resource_type = intent.replace('modify_', '')
+        handle_enhanced_modify_resource(user_message, resource_type, extracted_params, session_id)
+
     elif intent == 'cost_estimation':
         handle_enhanced_cost_estimation(user_message, session_id)
 
@@ -1255,6 +1550,158 @@ def handle_enhanced_cost_estimation(user_message, session_id):
         st.session_state.messages.append({"role": "assistant", "content": f"Error estimating cost: {e}"})
         diagnose_error(f"Error estimating cost: {e}", traceback.format_exc())
 
+def handle_enhanced_modify_resource(user_message, resource_type, extracted_params, session_id):
+    """
+    Enhanced resource modification with smart parameter extraction and context awareness.
+    """
+    st.session_state.messages.append({"role": "assistant", "content": f"✅ I can help you modify a {resource_type.upper()} resource."})
+
+    # Extract parameters using enhanced extractor
+    all_params = extract_parameters(user_message, resource_type, get_recent_history(session_id), st.session_state.get('user_id', 'default_user'))
+
+    # Merge with any previously extracted parameters
+    if extracted_params:
+        all_params.update(extracted_params)
+
+    # For modify operations, we need to identify which parameter to modify
+    # Look for specific modify patterns in the message
+    modify_patterns = {
+        'vol1_root_size': [
+            r'\b(modify|change|update)\s+(root\s+)?disk\s+size\s+to\s+(\d+)\s*(gb|gigabytes?)',
+            r'\b(modify|change|update)\s+(root\s+)?volume\s+size\s+to\s+(\d+)\s*(gb|gigabytes?)',
+            r'\bset\s+(root\s+)?disk\s+size\s+to\s+(\d+)\s*(gb|gigabytes?)',
+            r'\bset\s+(root\s+)?volume\s+size\s+to\s+(\d+)\s*(gb|gigabytes?)'
+        ],
+        'vol1_volume_type': [
+            r'\b(modify|change|update)\s+(root\s+)?volume\s+type\s+to\s+(\w+)',
+            r'\bset\s+(root\s+)?volume\s+type\s+to\s+(\w+)'
+        ],
+        'ec2_type': [
+            r'\b(modify|change|update)\s+instance\s+type\s+to\s+([\w\.\-]+)',
+            r'\bset\s+instance\s+type\s+to\s+([\w\.\-]+)'
+        ]
+    }
+
+    # Try to identify the parameter to modify and its new value
+    param_to_modify = None
+    new_value = None
+
+    message_lower = user_message.lower()
+    for param, patterns in modify_patterns.items():
+        for pattern in patterns:
+            match = re.search(pattern, message_lower)
+            if match:
+                param_to_modify = param
+                # Extract the value (usually in the last group)
+                if match.lastindex >= 2:
+                    new_value = match.group(match.lastindex - 1)  # Usually the value is in the second-to-last group
+                    if param in ['vol1_root_size'] and match.lastindex >= 3:
+                        new_value = match.group(match.lastindex - 2)  # For size patterns, value is earlier
+                break
+        if param_to_modify:
+            break
+
+    # If we couldn't extract the parameter from patterns, try from all_params
+    if not param_to_modify:
+        # Check if any parameters were extracted that make sense for modification
+        modifiable_params = ['vol1_root_size', 'vol1_volume_type', 'ec2_type']
+        for param in modifiable_params:
+            if param in all_params:
+                param_to_modify = param
+                new_value = all_params[param]
+                break
+
+    if not param_to_modify or not new_value:
+        # If we can't determine what to modify, fall back to the standard modify flow
+        st.session_state.messages.append({"role": "assistant", "content": f"I need more information to modify your {resource_type.upper()}. Let me show you your existing resources."})
+        st.session_state.conversation_flow = {
+            "active": True,
+            "type": "modify_resource",
+            "resource_type": resource_type,
+        }
+        handle_modify_resource_flow(None)
+        return
+
+    # We have the parameter and value, now find the resource to modify
+    try:
+        list_function = getattr(terraform_service, f"list_{resource_type}")
+        resources = list_function()
+
+        if not resources:
+            st.session_state.messages.append({"role": "assistant", "content": f"No {resource_type.upper()} resources found to modify."})
+            return
+
+        if len(resources) == 1:
+            # Only one resource, use it
+            selected_resource = resources[0]
+        else:
+            # Multiple resources - require explicit user selection for safety
+            resource_list_str = f"I found multiple {resource_type.upper()} resources. Please select which one to modify:\n"
+            for i, resource in enumerate(resources):
+                resource_list_str += f"{i+1}. {resource[RESOURCE_IDENTIFIERS[resource_type]]}\n"
+            st.session_state.messages.append({"role": "assistant", "content": resource_list_str})
+
+            # Set up flow to wait for user selection
+            st.session_state.conversation_flow = {
+                "active": True,
+                "type": "modify_resource",
+                "resource_type": resource_type,
+                "resources": resources,
+                "awaiting_selection": True,
+                "param_to_modify": param_to_modify,
+                "new_value": new_value
+            }
+            return
+
+        # Get the instance ID
+        instance_id = selected_resource[RESOURCE_DESTROY_IDS[resource_type]]
+
+        # Execute the modification
+        with st.spinner(f"Modifying {resource_type.upper()} {instance_id}..."):
+            try:
+                if param_to_modify == 'vol1_root_size':
+                    response = terraform_service.update_ec2_volume_size(instance_id, new_value)
+                else:
+                    # For other parameters, we might need different functions
+                    # For now, fall back to standard modify flow
+                    st.session_state.messages.append({"role": "assistant", "content": f"Modifying {param_to_modify.replace('_', ' ').title()} is not yet supported through this enhanced flow. Let me use the standard modification process."})
+                    st.session_state.conversation_flow = {
+                        "active": True,
+                        "type": "modify_resource",
+                        "resource_type": resource_type,
+                        "selected_resource": selected_resource,
+                        "resource_selected": True,
+                        "awaiting_param_selection": True
+                    }
+                    handle_modify_resource_flow(None)
+                    return
+
+                st.session_state.messages.append({"role": "assistant", "content": f"✅ {resource_type.upper()} modified successfully!\n\n**Parameter Updated:** {param_to_modify.replace('_', ' ').title()}\n**New Value:** {new_value}"})
+
+                # Update context with the modification
+                update_context(session_id, last_action=f"modified_{resource_type}", modified_param=param_to_modify)
+
+            except Exception as e:
+                st.session_state.messages.append({"role": "assistant", "content": f"❌ Error modifying {resource_type.upper()}: {e}"})
+                session_id = st.session_state.get('session_id', 'default_session')
+                diagnose_error(
+                    f"Error modifying {resource_type.upper()}",
+                    traceback.format_exc(),
+                    f"modify_{resource_type}",
+                    {"param_to_modify": param_to_modify, "new_value": new_value},
+                    session_id
+                )
+
+    except Exception as e:
+        st.session_state.messages.append({"role": "assistant", "content": f"Error accessing {resource_type.upper()} resources: {e}"})
+        diagnose_error(
+            f"Error listing {resource_type.upper()} for modification",
+            traceback.format_exc(),
+            f"list_{resource_type}",
+            {},
+            session_id
+        )
+
 def handle_enhanced_help(session_id):
     """
     Enhanced help with contextual suggestions.
@@ -1273,6 +1720,7 @@ def handle_enhanced_help(session_id):
 • Create resources: "create an EC2 instance", "create an S3 bucket", etc.
 • List resources: "list EC2 instances", "list S3 buckets", etc.
 • Destroy resources: "destroy EC2 instance", "destroy S3 bucket", etc.
+• Modify resources: "modify root disk size to 150gb", "change instance type", etc.
 • Cost estimation: "what's the cost of..."
 • Help: "help" or "what can you do"
 
