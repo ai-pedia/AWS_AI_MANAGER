@@ -179,3 +179,4 @@ AWS_AI_Manager_Presentation.pptx
 
 # Presentation generation script
 generate_ppt.py
+test_parameter_extraction.py
